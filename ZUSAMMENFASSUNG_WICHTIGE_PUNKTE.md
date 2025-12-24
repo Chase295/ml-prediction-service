@@ -10,6 +10,7 @@
 ### 1. **Modell-Verwaltung (via n8n oder UI)**
 - ✅ Modelle vom Training Service importieren (Download + lokale Speicherung)
 - ✅ Modelle aktivieren/deaktivieren
+- ✅ Modelle umbenennen (lokal, ohne Training Service zu ändern)
 - ✅ Modelle löschen (aus DB + lokale Datei)
 - ✅ Status abfragen
 
@@ -22,8 +23,11 @@
 
 ### 3. **n8n Integration**
 - ✅ **ALLE Vorhersagen** an n8n senden (nicht nur Alerts!)
-- ✅ n8n entscheidet dann (Filter, Thresholds, Trading, etc.)
-- ✅ Webhook-Logging für Debugging
+- ✅ **JSON-Format** (FastAPI automatisch)
+- ✅ **Vollständige Modell-Informationen** in Payload (Name, Typ, Features, etc.)
+- ✅ **Alert-Flag** für jede Vorhersage (`is_alert: true/false`)
+- ✅ **Metadata** (Anzahl Vorhersagen, Alerts, Service-Version)
+- ✅ Webhook-Logging in DB für Debugging
 
 ---
 
@@ -97,6 +101,7 @@ POST   /api/models/import              → Importiert Modell (Download + Speiche
 GET    /api/models/active             → Liste aktiver Modelle (aus prediction_active_models)
 POST   /api/models/{id}/activate      → Aktiviert Modell
 POST   /api/models/{id}/deactivate    → Deaktiviert Modell
+PATCH  /api/models/{id}/rename        → Benennt Modell um (lokal)
 DELETE /api/models/{id}                → Löscht Modell (DB + Datei)
 ```
 
@@ -146,7 +151,29 @@ BATCH_TIMEOUT_SECONDS=5
 # Performance
 MAX_CONCURRENT_PREDICTIONS=10
 MODEL_CACHE_SIZE=10
+
+# Logging
+LOG_LEVEL=INFO              # DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_FORMAT=text             # "text" oder "json"
+LOG_JSON_INDENT=0          # 0 = kompakt, 2+ = formatiert
 ```
+
+---
+
+## 📝 Logging
+
+### **Strukturiertes Logging:**
+- ✅ Text oder JSON-Format (konfigurierbar)
+- ✅ Request-ID für Tracing
+- ✅ Strukturierte Log-Messages
+- ✅ Wichtige Events werden geloggt (Import, Vorhersagen, n8n Calls, Fehler)
+
+### **Log-Punkte:**
+- Modell-Import/Download
+- Vorhersagen (mit Coin-ID, Modell-ID, Ergebnis)
+- n8n Webhook-Calls (Erfolg/Fehler)
+- Event-Handler (LISTEN/NOTIFY oder Polling)
+- Fehler (mit vollständigem Context)
 
 ---
 
@@ -173,6 +200,12 @@ MODEL_CACHE_SIZE=10
 - ✅ Fallback: Polling alle 30s
 - ✅ Automatischer Fallback bei Fehlern
 
+### **5. n8n Payload-Format**
+- ✅ **JSON-Format** (FastAPI `json=` Parameter)
+- ✅ **Vollständige Modell-Informationen** (Name, Typ, Features, etc.)
+- ✅ **Alert-Flag** (`is_alert: true/false`) für jede Vorhersage
+- ✅ **Metadata** (Anzahl Vorhersagen, Alerts, Service-Version)
+
 ---
 
 ## 📊 Workflow
@@ -196,8 +229,37 @@ MODEL_CACHE_SIZE=10
      - Feature-Aufbereitung
      - Vorhersage machen
      - Speichern in DB
-5. ALLE Vorhersagen an n8n senden
+5. ALLE Vorhersagen an n8n senden (mit Modell-Informationen + Alert-Flag)
 6. n8n entscheidet was passiert
+```
+
+**n8n Payload-Beispiel:**
+```json
+{
+  "coin_id": "ABC123...",
+  "timestamp": "2024-12-24T10:00:00+00:00",
+  "predictions": [
+    {
+      "prediction": 1,
+      "probability": 0.85,
+      "is_alert": true,
+      "alert_threshold": 0.70,
+      "model": {
+        "id": 1,
+        "name": "PumpDetector_v1",
+        "custom_name": "Mein Pump Detector",  // Falls umbenannt
+        "model_type": "xgboost",
+        "features": [...],
+        ...
+      }
+    }
+  ],
+  "metadata": {
+    "total_predictions": 1,
+    "alerts_count": 1,
+    "service": "ml-prediction-service"
+  }
+}
 ```
 
 ---
