@@ -111,11 +111,13 @@ touch docker-compose.yml  # Optional für lokales Testing
 
 ---
 
-### **Schritt 2: Datenbank-Schema erweitern (Externe DB)**
+### **Schritt 2: Datenbank-Schema erstellen (Separate Tabellen)**
 
-**⚠️ WICHTIG - Schema-Erweiterungen:**
-- Die `ml_models` Tabelle muss erweitert werden (`is_active`, `alert_threshold`)
-- Neue Tabellen: `predictions`, `prediction_alerts` (optional)
+**⚠️ WICHTIG - Getrennte Tabellen-Struktur:**
+- **KEIN `is_active` in `ml_models`!** (separater Server)
+- Separate Tabelle: `prediction_active_models` (lokal im Prediction Service)
+- Modell-Download und lokale Speicherung
+- LISTEN/NOTIFY Trigger für Echtzeit-Kommunikation
 
 **Was zu tun ist:**
 1. Verbinde dich mit deiner **externen PostgreSQL-Datenbank**
@@ -128,74 +130,143 @@ touch docker-compose.yml  # Optional für lokales Testing
 Erstelle `sql/schema.sql`:
 ```sql
 -- ============================================================
--- ML Prediction Service - Datenbank-Schema-Erweiterungen
+-- ML Prediction Service - Datenbank-Schema
 -- Version: 1.0
+-- SEPARATE Tabellen-Struktur (keine Änderungen an ml_models!)
 -- ============================================================
 
--- 1. Erweitere ml_models Tabelle
-ALTER TABLE ml_models 
-ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT false,
-ADD COLUMN IF NOT EXISTS alert_threshold NUMERIC(5, 4) DEFAULT 0.7;
+-- 1. Erstelle prediction_active_models Tabelle
+-- Speichert welche Modelle im Prediction Service aktiv sind
+CREATE TABLE IF NOT EXISTS prediction_active_models (
+    id BIGSERIAL PRIMARY KEY,
+    model_id BIGINT NOT NULL,  -- Referenz zu ml_models.id (kein FK, da separater Server)
+    model_name VARCHAR(255) NOT NULL,
+    model_type VARCHAR(50) NOT NULL,
+    
+    -- Modell-Metadaten (Kopie aus ml_models für schnellen Zugriff)
+    target_variable VARCHAR(100) NOT NULL,
+    target_operator VARCHAR(10),
+    target_value NUMERIC(20, 2),
+    future_minutes INTEGER,
+    price_change_percent NUMERIC(10, 4),
+    target_direction VARCHAR(10),
+    
+    -- Features und Konfiguration (JSONB)
+    features JSONB NOT NULL,
+    phases JSONB,
+    params JSONB,
+    
+    -- Modell-Datei (lokal gespeichert)
+    local_model_path TEXT NOT NULL,  -- Pfad zur lokalen .pkl Datei
+    model_file_url TEXT,  -- URL zum Download (optional, falls nötig)
+    
+    -- Status
+    is_active BOOLEAN DEFAULT true,
+    last_prediction_at TIMESTAMP WITH TIME ZONE,
+    total_predictions BIGINT DEFAULT 0,
+    
+    -- Metadaten
+    downloaded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    activated_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- Constraints
+    CONSTRAINT chk_model_type CHECK (model_type IN ('random_forest', 'xgboost')),
+    CONSTRAINT chk_operator CHECK (target_operator IS NULL OR target_operator IN ('>', '<', '>=', '<=', '=')),
+    CONSTRAINT chk_direction CHECK (target_direction IS NULL OR target_direction IN ('up', 'down')),
+    
+    -- Unique: Ein Modell kann nur einmal aktiv sein
+    UNIQUE(model_id)
+);
 
--- Index für aktive Modelle
-CREATE INDEX IF NOT EXISTS idx_models_active 
-ON ml_models(is_active) WHERE is_active = true AND status = 'READY';
+-- Indizes
+CREATE INDEX IF NOT EXISTS idx_active_models_active 
+ON prediction_active_models(is_active) WHERE is_active = true;
+
+CREATE INDEX IF NOT EXISTS idx_active_models_model_id 
+ON prediction_active_models(model_id);
 
 -- 2. Erstelle predictions Tabelle
 CREATE TABLE IF NOT EXISTS predictions (
     id BIGSERIAL PRIMARY KEY,
     coin_id VARCHAR(255) NOT NULL,
-    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
-    model_id BIGINT NOT NULL REFERENCES ml_models(id) ON DELETE CASCADE,
+    data_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,  -- Zeitstempel der Daten
+    model_id BIGINT NOT NULL,  -- Referenz zu ml_models.id (kein FK)
+    active_model_id BIGINT REFERENCES prediction_active_models(id) ON DELETE SET NULL,
     
     -- Vorhersage
-    prediction INTEGER NOT NULL,  -- 0 oder 1
-    probability NUMERIC(5, 4) NOT NULL,  -- 0.0000 - 1.0000
+    prediction INTEGER NOT NULL CHECK (prediction IN (0, 1)),
+    probability NUMERIC(5, 4) NOT NULL CHECK (probability >= 0.0 AND probability <= 1.0),
+    
+    -- Phase zum Zeitpunkt der Vorhersage
+    phase_id_at_time INTEGER,
     
     -- Features (optional, für Debugging)
     features JSONB,
     
-    -- Metadaten
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    -- Performance
+    prediction_duration_ms INTEGER,
     
-    -- Constraints
-    CONSTRAINT chk_prediction CHECK (prediction IN (0, 1)),
-    CONSTRAINT chk_probability CHECK (probability >= 0.0 AND probability <= 1.0)
+    -- Metadaten
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Indizes für Performance
 CREATE INDEX IF NOT EXISTS idx_predictions_coin_timestamp 
-ON predictions(coin_id, timestamp DESC);
+ON predictions(coin_id, data_timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_predictions_model 
-ON predictions(model_id);
+ON predictions(model_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_predictions_active_model 
+ON predictions(active_model_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_predictions_created 
 ON predictions(created_at DESC);
 
--- 3. Erstelle prediction_alerts Tabelle (Optional)
-CREATE TABLE IF NOT EXISTS prediction_alerts (
+-- 3. Erstelle LISTEN/NOTIFY Trigger für coin_metrics
+-- Trigger-Funktion
+CREATE OR REPLACE FUNCTION notify_coin_metrics_insert()
+RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_notify(
+        'coin_metrics_insert',
+        json_build_object(
+            'mint', NEW.mint,
+            'timestamp', NEW.timestamp,
+            'phase_id', NEW.phase_id_at_time
+        )::text
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger erstellen (nur wenn noch nicht existiert)
+DROP TRIGGER IF EXISTS coin_metrics_insert_trigger ON coin_metrics;
+CREATE TRIGGER coin_metrics_insert_trigger
+    AFTER INSERT ON coin_metrics
+    FOR EACH ROW
+    EXECUTE FUNCTION notify_coin_metrics_insert();
+
+-- 4. Erstelle prediction_webhook_log Tabelle (optional, für Debugging)
+CREATE TABLE IF NOT EXISTS prediction_webhook_log (
     id BIGSERIAL PRIMARY KEY,
-    prediction_id BIGINT REFERENCES predictions(id) ON DELETE CASCADE,
     coin_id VARCHAR(255) NOT NULL,
-    model_id BIGINT NOT NULL,
-    probability NUMERIC(5, 4) NOT NULL,
-    threshold NUMERIC(5, 4) NOT NULL,
-    alert_sent BOOLEAN DEFAULT false,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    
-    CONSTRAINT chk_alert_probability CHECK (probability >= 0.0 AND probability <= 1.0),
-    CONSTRAINT chk_alert_threshold CHECK (threshold >= 0.0 AND threshold <= 1.0)
+    data_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+    webhook_url TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    response_status INTEGER,
+    response_body TEXT,
+    error_message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_alerts_coin 
-ON prediction_alerts(coin_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webhook_log_created 
+ON prediction_webhook_log(created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_alerts_model 
-ON prediction_alerts(model_id);
-
-CREATE INDEX IF NOT EXISTS idx_alerts_sent 
-ON prediction_alerts(alert_sent) WHERE alert_sent = false;
+CREATE INDEX IF NOT EXISTS idx_webhook_log_status 
+ON prediction_webhook_log(response_status) WHERE response_status IS NOT NULL;
 ```
 
 Dann ausführen:
@@ -220,19 +291,18 @@ psql -h <EXTERNE_DB_HOST> -p <PORT> -U <DB_USER> -d crypto -c "
 SELECT table_name 
 FROM information_schema.tables 
 WHERE table_schema = 'public' 
-AND table_name IN ('predictions', 'prediction_alerts');
+AND table_name IN ('prediction_active_models', 'predictions', 'prediction_webhook_log');
 "
 
-# Prüfe ob ml_models erweitert wurde
+# Prüfe ob Trigger erstellt wurde
 psql -h <EXTERNE_DB_HOST> -p <PORT> -U <DB_USER> -d crypto -c "
-SELECT column_name, data_type 
-FROM information_schema.columns 
-WHERE table_name = 'ml_models' 
-AND column_name IN ('is_active', 'alert_threshold');
+SELECT trigger_name, event_manipulation, event_object_table
+FROM information_schema.triggers
+WHERE trigger_name = 'coin_metrics_insert_trigger';
 "
 ```
 
-**Ergebnis:** Externe Datenbank ist bereit mit allen Tabellen und Erweiterungen.
+**Ergebnis:** Externe Datenbank ist bereit mit separaten Tabellen und LISTEN/NOTIFY Trigger.
 
 ---
 
@@ -261,6 +331,9 @@ joblib==1.3.2
 # Utilities
 prometheus-client==0.19.0
 python-dateutil==2.8.2
+aiohttp==3.9.1  # Für n8n Webhooks
+streamlit==1.28.0  # Für Web UI
+plotly==5.18.0  # Für Charts in Streamlit
 ```
 
 **Ergebnis:** Alle Dependencies sind definiert.
@@ -288,8 +361,11 @@ python-dateutil==2.8.2
   # Ports
   API_PORT = int(os.getenv("API_PORT", "8000"))
   
-  # Modell-Storage (MUSS verfügbar sein!)
-  MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "/app/models")
+# Modell-Storage (lokal im Container)
+MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "/app/models")
+
+# Training Service API (für Modell-Download)
+TRAINING_SERVICE_API_URL = os.getenv("TRAINING_SERVICE_API_URL", "http://localhost:8000/api")
   
   # Event-Handling
   POLLING_INTERVAL_SECONDS = int(os.getenv("POLLING_INTERVAL_SECONDS", "30"))
@@ -418,25 +494,42 @@ Führe aus: `docker exec -it <container> python test_db_connection.py`
 
 ---
 
-### **Schritt 6: Datenbank-Modelle (SQL Queries)**
+### **Schritt 6: Datenbank-Modelle (SQL Queries) - SEPARATE Tabellen**
+
+**⚠️ WICHTIG: Getrennte Tabellen-Struktur!**
+- **KEIN `is_active` in `ml_models`!** (separater Server)
+- Nutze `prediction_active_models` Tabelle (lokal im Prediction Service)
+- Modell-Download und lokale Speicherung
 
 **Was zu tun ist:**
 1. Erstelle `app/database/models.py`
 2. Definiere SQL-Queries für alle CRUD-Operationen
-3. Funktionen für: ml_models, predictions, prediction_alerts
+3. Funktionen für: `prediction_active_models`, `predictions`, `ml_models` (nur lesen!)
 
 **Vorgehen:**
 - Erstelle Funktionen wie:
-  - **`get_active_models()`** → Holt alle aktiven Modelle aus `ml_models`
-    - Filter: `is_active = true AND status = 'READY'`
+  - **`get_available_models()`** → Holt alle verfügbaren Modelle aus `ml_models` (READY, nicht gelöscht)
+    - Filter: `status = 'READY' AND is_deleted = false`
+    - Gibt Liste von Modellen zurück (für Import)
+  - **`get_model_from_training_service(model_id)`** → Holt Modell-Metadaten aus `ml_models`
+    - **WICHTIG:** Nur lesen, keine Änderungen!
+  - **`download_model_file(model_id)`** → Lädt Modell-Datei vom Training Service
+    - API-Call: `GET /api/models/{id}/download`
+    - Speichert lokal in `MODEL_STORAGE_PATH`
+  - **`import_model(model_id)`** → Importiert Modell in `prediction_active_models`
+    - 1. Hole Metadaten aus `ml_models`
+    - 2. Lade Modell-Datei (Download)
+    - 3. Speichere in `prediction_active_models`
+    - 4. Setze `is_active = true`
+  - **`get_active_models()`** → Holt alle aktiven Modelle aus `prediction_active_models`
+    - Filter: `is_active = true`
     - Gibt Liste von Modell-Konfigurationen zurück
-  - **`get_model(model_id)`** → Holt Modell aus DB
-  - **`activate_model(model_id)`** → Setzt `is_active = true`
-  - **`deactivate_model(model_id)`** → Setzt `is_active = false`
+  - **`activate_model(active_model_id)`** → Setzt `is_active = true` in `prediction_active_models`
+  - **`deactivate_model(active_model_id)`** → Setzt `is_active = false` in `prediction_active_models`
+  - **`delete_active_model(active_model_id)`** → Löscht Modell aus `prediction_active_models` + lokale Datei
   - **`save_prediction()`** → Erstellt Eintrag in `predictions`
   - **`get_predictions()`** → Holt Vorhersagen (mit Filtern)
   - **`get_latest_prediction(coin_id)`** → Neueste Vorhersage für Coin
-  - **`save_alert()`** → Erstellt Eintrag in `prediction_alerts`
 - Nutze Prepared Statements mit `$1, $2, ...` (asyncpg)
 - **⚠️ WICHTIG: JSONB statt CSV-Strings!**
   - **PostgreSQL JSONB:** asyncpg konvertiert automatisch Python-Listen/Dicts zu JSONB
