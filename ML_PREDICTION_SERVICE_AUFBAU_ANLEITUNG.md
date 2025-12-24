@@ -176,6 +176,9 @@ CREATE TABLE IF NOT EXISTS prediction_active_models (
     CONSTRAINT chk_operator CHECK (target_operator IS NULL OR target_operator IN ('>', '<', '>=', '<=', '=')),
     CONSTRAINT chk_direction CHECK (target_direction IS NULL OR target_direction IN ('up', 'down')),
     
+    -- Custom Name (für lokale Umbenennung)
+    custom_name VARCHAR(255),  -- Optional: Lokaler Name (falls umbenannt)
+    
     -- Unique: Ein Modell kann nur einmal aktiv sein
     UNIQUE(model_id)
 );
@@ -186,6 +189,9 @@ ON prediction_active_models(is_active) WHERE is_active = true;
 
 CREATE INDEX IF NOT EXISTS idx_active_models_model_id 
 ON prediction_active_models(model_id);
+
+CREATE INDEX IF NOT EXISTS idx_active_models_custom_name 
+ON prediction_active_models(custom_name) WHERE custom_name IS NOT NULL;
 
 -- 2. Erstelle predictions Tabelle
 CREATE TABLE IF NOT EXISTS predictions (
@@ -334,6 +340,9 @@ python-dateutil==2.8.2
 aiohttp==3.9.1  # Für n8n Webhooks
 streamlit==1.28.0  # Für Web UI
 plotly==5.18.0  # Für Charts in Streamlit
+
+# Logging (optional, für strukturiertes Logging)
+python-json-logger==2.0.7  # Optional, wenn JSON-Logging gewünscht
 ```
 
 **Ergebnis:** Alle Dependencies sind definiert.
@@ -379,9 +388,17 @@ TRAINING_SERVICE_API_URL = os.getenv("TRAINING_SERVICE_API_URL", "http://localho
   MAX_CONCURRENT_PREDICTIONS = int(os.getenv("MAX_CONCURRENT_PREDICTIONS", "10"))
   MODEL_CACHE_SIZE = int(os.getenv("MODEL_CACHE_SIZE", "10"))
   
-  # Alerts
-  DEFAULT_ALERT_THRESHOLD = float(os.getenv("DEFAULT_ALERT_THRESHOLD", "0.7"))
-  ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", None)  # Optional
+  # n8n Integration
+  N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", None)  # Optional
+  N8N_WEBHOOK_TIMEOUT = int(os.getenv("N8N_WEBHOOK_TIMEOUT", "5"))  # Sekunden
+  
+  # Training Service (für Modell-Download)
+  TRAINING_SERVICE_API_URL = os.getenv("TRAINING_SERVICE_API_URL", "http://localhost:8000/api")
+  
+  # Logging
+  LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  LOG_FORMAT = os.getenv("LOG_FORMAT", "text")  # "text" oder "json"
+  LOG_JSON_INDENT = int(os.getenv("LOG_JSON_INDENT", "0"))  # 0 = kompakt, 2+ = formatiert
   ```
 - Erstelle `.env.example`:
   ```
@@ -404,8 +421,17 @@ TRAINING_SERVICE_API_URL = os.getenv("TRAINING_SERVICE_API_URL", "http://localho
   MAX_CONCURRENT_PREDICTIONS=10
   MODEL_CACHE_SIZE=10
   
-  # Alerts
-  DEFAULT_ALERT_THRESHOLD=0.7
+  # n8n Integration (optional)
+  N8N_WEBHOOK_URL=https://n8n.example.com/webhook/ml-predictions
+  N8N_WEBHOOK_TIMEOUT=5
+  
+  # Training Service (für Modell-Download)
+  TRAINING_SERVICE_API_URL=http://localhost:8000/api
+  
+  # Logging
+  LOG_LEVEL=INFO              # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  LOG_FORMAT=text             # "text" oder "json"
+  LOG_JSON_INDENT=0          # 0 = kompakt, 2+ = formatiert
   ```
 
 **⚠️ Wichtig - Externe Datenbank:**
@@ -527,6 +553,7 @@ Führe aus: `docker exec -it <container> python test_db_connection.py`
   - **`activate_model(active_model_id)`** → Setzt `is_active = true` in `prediction_active_models`
   - **`deactivate_model(active_model_id)`** → Setzt `is_active = false` in `prediction_active_models`
   - **`delete_active_model(active_model_id)`** → Löscht Modell aus `prediction_active_models` + lokale Datei
+  - **`rename_active_model(active_model_id, new_name)`** → Benennt Modell um (lokal)
   - **`save_prediction()`** → Erstellt Eintrag in `predictions`
   - **`get_predictions()`** → Holt Vorhersagen (mit Filtern)
   - **`get_latest_prediction(coin_id)`** → Neueste Vorhersage für Coin
@@ -601,7 +628,208 @@ async def get_active_models() -> List[Dict]:
 
 ---
 
-### **Schritt 7: Prometheus Metrics & Health Status**
+### **Schritt 7: Strukturiertes Logging**
+
+**Was zu tun ist:**
+1. Erstelle `app/utils/logging_config.py`
+2. Implementiere strukturiertes Logging (Text oder JSON)
+3. Request-ID für Tracing
+4. Konfigurierbar über Environment Variables
+
+**Vorgehen:**
+- Erstelle `app/utils/logging_config.py` (basierend auf Training Service):
+  ```python
+  """
+  Strukturiertes Logging für ML Prediction Service
+  
+  Features:
+  - JSON-Logging (optional)
+  - Konfigurierbares Log-Level
+  - Request-ID für Tracing
+  - Strukturierte Log-Messages
+  """
+  import os
+  import json
+  import logging
+  import uuid
+  from typing import Optional, Dict, Any
+  from datetime import datetime, timezone
+  from contextvars import ContextVar
+  
+  # Context-Variable für Request-ID (Thread-safe)
+  request_id_var: ContextVar[Optional[str]] = ContextVar('request_id', default=None)
+  
+  # Logging-Konfiguration aus Environment Variables
+  from app.utils.config import LOG_LEVEL, LOG_FORMAT, LOG_JSON_INDENT
+  
+  class StructuredFormatter(logging.Formatter):
+      """Formatter für strukturierte Logs (JSON oder Text)"""
+      
+      def __init__(self, use_json: bool = False, json_indent: int = 0):
+          super().__init__()
+          self.use_json = use_json
+          self.json_indent = json_indent
+      
+      def format(self, record: logging.LogRecord) -> str:
+          # Basis-Informationen
+          log_data = {
+              "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+              "level": record.levelname,
+              "logger": record.name,
+              "message": record.getMessage(),
+          }
+          
+          # Request-ID hinzufügen (wenn vorhanden)
+          request_id = request_id_var.get()
+          if request_id:
+              log_data["request_id"] = request_id
+          
+          # Exception-Informationen hinzufügen
+          if record.exc_info:
+              log_data["exception"] = self.formatException(record.exc_info)
+          
+          # Zusätzliche Felder aus record (wenn vorhanden)
+          if hasattr(record, "extra_fields"):
+              log_data.update(record.extra_fields)
+          
+          # JSON oder Text-Format
+          if self.use_json:
+              return json.dumps(log_data, indent=self.json_indent, ensure_ascii=False)
+          else:
+              # Text-Format: Strukturiert aber lesbar
+              parts = [
+                  f"[{log_data['timestamp']}]",
+                  f"[{log_data['level']}]",
+                  f"[{log_data['logger']}]"
+              ]
+              if request_id:
+                  parts.append(f"[req:{request_id[:8]}]")
+              parts.append(log_data['message'])
+              
+              if record.exc_info:
+                  parts.append(f"\n{log_data['exception']}")
+              
+              return " ".join(parts)
+  
+  def setup_logging():
+      """Konfiguriert strukturiertes Logging für die gesamte Anwendung"""
+      # Log-Level validieren
+      valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+      if LOG_LEVEL not in valid_levels:
+          logging.warning(f"⚠️ Ungültiges LOG_LEVEL '{LOG_LEVEL}', verwende 'INFO'")
+          level = logging.INFO
+      else:
+          level = getattr(logging, LOG_LEVEL)
+      
+      # Format bestimmen
+      use_json = LOG_FORMAT.lower() == "json"
+      
+      # Root-Logger konfigurieren
+      root_logger = logging.getLogger()
+      root_logger.setLevel(level)
+      
+      # Entferne vorhandene Handler
+      root_logger.handlers.clear()
+      
+      # Console Handler erstellen
+      console_handler = logging.StreamHandler()
+      console_handler.setLevel(level)
+      
+      # Formatter setzen
+      formatter = StructuredFormatter(use_json=use_json, json_indent=LOG_JSON_INDENT)
+      console_handler.setFormatter(formatter)
+      
+      # Handler hinzufügen
+      root_logger.addHandler(console_handler)
+      
+      # Logging-Konfiguration loggen
+      logger = logging.getLogger(__name__)
+      logger.info(
+          f"📝 Logging konfiguriert: Level={LOG_LEVEL}, Format={'JSON' if use_json else 'Text'}"
+      )
+  
+  def get_logger(name: str) -> logging.Logger:
+      """Gibt Logger mit korrekter Konfiguration zurück"""
+      return logging.getLogger(name)
+  
+  def set_request_id(request_id: Optional[str] = None):
+      """Setzt Request-ID für aktuellen Context"""
+      if request_id is None:
+          request_id = str(uuid.uuid4())
+      request_id_var.set(request_id)
+      return request_id
+  
+  def get_request_id() -> Optional[str]:
+      """Gibt aktuelle Request-ID zurück"""
+      return request_id_var.get()
+  
+  def log_with_context(
+      logger: logging.Logger,
+      level: int,
+      message: str,
+      extra_fields: Optional[Dict[str, Any]] = None
+  ):
+      """Loggt mit zusätzlichen Context-Feldern"""
+      if extra_fields:
+          # Füge extra_fields als Attribute hinzu
+          record = logging.LogRecord(
+              logger.name, level, "", 0, message, (), None
+          )
+          record.extra_fields = extra_fields
+          logger.handle(record)
+      else:
+          logger.log(level, message)
+  ```
+
+- In `app/main.py` beim Startup aufrufen:
+  ```python
+  from app.utils.logging_config import setup_logging
+  
+  # Beim Startup
+  setup_logging()
+  logger = get_logger(__name__)
+  logger.info("🚀 ML Prediction Service startet...")
+  ```
+
+- Request-ID Middleware (optional, für API-Requests):
+  ```python
+  # app/api/middleware.py
+  from fastapi import Request
+  from starlette.middleware.base import BaseHTTPMiddleware
+  from app.utils.logging_config import set_request_id, get_request_id
+  
+  class RequestIDMiddleware(BaseHTTPMiddleware):
+      async def dispatch(self, request: Request, call_next):
+          # Generiere Request-ID
+          request_id = set_request_id()
+          
+          # Füge zu Response-Header hinzu
+          response = await call_next(request)
+          response.headers["X-Request-ID"] = request_id
+          
+          return response
+  ```
+
+**Ergebnis:** Strukturiertes Logging ist konfiguriert.
+
+**🧪 Test-Schritt:**
+```python
+# Teste Logging:
+from app.utils.logging_config import get_logger, log_with_context
+
+logger = get_logger(__name__)
+logger.info("✅ Test-Log (normal)")
+log_with_context(
+    logger,
+    logging.INFO,
+    "✅ Test-Log mit Context",
+    extra_fields={"coin_id": "ABC123", "model_id": 1}
+)
+```
+
+---
+
+### **Schritt 7.5: Prometheus Metrics & Health Status**
 
 **Was zu tun ist:**
 1. Erstelle `app/utils/metrics.py`
@@ -1292,13 +1520,187 @@ if models:
               await asyncio.sleep(POLLING_INTERVAL_SECONDS)
   ```
 
-**Ergebnis:** Event-Handler überwacht `coin_metrics` und macht automatisch Vorhersagen.
+**n8n Webhook-Funktion (erweitert mit Modell-Informationen):**
+```python
+# app/prediction/n8n_client.py
+
+import aiohttp
+from datetime import datetime
+from typing import List, Dict
+from app.utils.config import N8N_WEBHOOK_URL, N8N_WEBHOOK_TIMEOUT, DEFAULT_ALERT_THRESHOLD
+from app.utils.logging_config import get_logger
+from app.database.connection import get_pool
+
+logger = get_logger(__name__)
+
+async def send_to_n8n(
+    coin_id: str,
+    timestamp: datetime,
+    predictions: List[Dict],
+    active_models: List[Dict]
+) -> bool:
+    """
+    Sendet ALLE Vorhersagen an n8n Webhook.
+    
+    Payload enthält:
+    - Coin-Informationen
+    - Alle Vorhersagen mit vollständigen Modell-Informationen
+    - Alert-Flag für jede Vorhersage
+    - Metadata (Anzahl Vorhersagen, Alerts, etc.)
+    """
+    if not N8N_WEBHOOK_URL:
+        logger.debug("N8N_WEBHOOK_URL nicht gesetzt - überspringe Webhook")
+        return False
+    
+    # Erweitere Predictions mit Modell-Informationen
+    enriched_predictions = []
+    for pred in predictions:
+        model_id = pred['model_id']
+        
+        # Finde Modell-Informationen
+        model_info = next(
+            (m for m in active_models if m['model_id'] == model_id),
+            None
+        )
+        
+        if not model_info:
+            logger.warning(f"Modell-Informationen nicht gefunden für model_id={model_id}")
+            continue
+        
+        # Alert-Threshold prüfen
+        threshold = model_info.get('alert_threshold', DEFAULT_ALERT_THRESHOLD)
+        is_alert = pred['probability'] > threshold
+        
+        # Erweiterte Prediction
+        enriched_pred = {
+            # Vorhersage-Daten
+            "prediction": pred['prediction'],
+            "probability": float(pred['probability']),
+            "is_alert": is_alert,
+            "alert_threshold": float(threshold),
+            
+            # Modell-Informationen
+            "model": {
+                "id": model_id,
+                "active_model_id": model_info['id'],
+                "name": model_info['name'],
+                "custom_name": model_info.get('custom_name'),  # Falls umbenannt
+                "model_type": model_info['model_type'],
+                "target_variable": model_info['target_variable'],
+                "target_operator": model_info.get('target_operator'),
+                "target_value": float(model_info['target_value']) if model_info.get('target_value') else None,
+                "future_minutes": model_info.get('future_minutes'),
+                "price_change_percent": float(model_info['price_change_percent']) if model_info.get('price_change_percent') else None,
+                "target_direction": model_info.get('target_direction'),
+                "features": model_info['features'],
+                "phases": model_info.get('phases'),
+                "total_predictions": model_info.get('total_predictions', 0),
+                "last_prediction_at": model_info.get('last_prediction_at').isoformat() if model_info.get('last_prediction_at') else None
+            }
+        }
+        
+        enriched_predictions.append(enriched_pred)
+    
+    # Vollständige Payload
+    payload = {
+        "coin_id": coin_id,
+        "timestamp": timestamp.isoformat(),
+        "predictions": enriched_predictions,
+        "metadata": {
+            "total_predictions": len(enriched_predictions),
+            "alerts_count": sum(1 for p in enriched_predictions if p['is_alert']),
+            "service": "ml-prediction-service",
+            "version": "1.0.0"
+        }
+    }
+    
+    # Sende an n8n
+    pool = await get_pool()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                N8N_WEBHOOK_URL,
+                json=payload,  # ⚠️ WICHTIG: json= für JSON-Format!
+                timeout=aiohttp.ClientTimeout(total=N8N_WEBHOOK_TIMEOUT),
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                if response.status == 200:
+                    logger.info(
+                        f"✅ Vorhersagen an n8n gesendet für Coin {coin_id}",
+                        extra={
+                            "coin_id": coin_id,
+                            "predictions_count": len(enriched_predictions),
+                            "alerts_count": sum(1 for p in enriched_predictions if p['is_alert'])
+                        }
+                    )
+                    
+                    # Log in DB (optional)
+                    await log_webhook_call(coin_id, timestamp, payload, response.status, None, pool)
+                    return True
+                else:
+                    error_text = await response.text()
+                    logger.warning(
+                        f"⚠️ n8n Webhook Fehler: {response.status}",
+                        extra={
+                            "coin_id": coin_id,
+                            "status": response.status,
+                            "error": error_text
+                        }
+                    )
+                    
+                    # Log in DB
+                    await log_webhook_call(coin_id, timestamp, payload, response.status, error_text, pool)
+                    return False
+                    
+    except Exception as e:
+        logger.error(
+            f"❌ Fehler beim Senden an n8n: {e}",
+            extra={"coin_id": coin_id, "error": str(e)},
+            exc_info=True
+        )
+        
+        # Log in DB
+        await log_webhook_call(coin_id, timestamp, payload, None, str(e), pool)
+        return False
+
+async def log_webhook_call(
+    coin_id: str,
+    timestamp: datetime,
+    payload: Dict,
+    response_status: Optional[int],
+    error_message: Optional[str],
+    pool
+):
+    """Loggt Webhook-Call in DB"""
+    import json
+    from app.utils.config import N8N_WEBHOOK_URL
+    
+    await pool.execute("""
+        INSERT INTO prediction_webhook_log (
+            coin_id, data_timestamp, webhook_url, payload,
+            response_status, error_message
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+    """,
+        coin_id,
+        timestamp,
+        N8N_WEBHOOK_URL,
+        json.dumps(payload),  # JSONB
+        response_status,
+        error_message
+    )
+```
+
+**Ergebnis:** Event-Handler überwacht `coin_metrics` (LISTEN/NOTIFY oder Polling) und macht automatisch Vorhersagen. Alle Vorhersagen werden an n8n gesendet mit vollständigen Modell-Informationen und Alert-Flag.
 
 **🧪 Test-Schritt:**
-- Teste Polling-Loop:
+- Teste LISTEN/NOTIFY:
   - Starte Service
   - Füge neuen Eintrag in `coin_metrics` ein
-  - Prüfe ob Vorhersage erstellt wurde
+  - Prüfe ob Vorhersage sofort erstellt wurde (< 1 Sekunde)
+  - Prüfe n8n Webhook-Log in DB
+- Teste Polling-Fallback:
+  - Deaktiviere Trigger in DB
+  - Prüfe ob Polling funktioniert
 
 ---
 
@@ -1325,6 +1727,9 @@ if models:
     - `predictions`: List[Dict]
     - `total`: Integer
     - `limit`, `offset`: Integer
+  - `RenameModelRequest`:
+    - `name`: String (neuer Modell-Name)
+    - `description`: Optional[String] (optional: Beschreibung)
   - `HealthResponse`:
     - `status`: String
     - `active_models`: Integer
@@ -1356,6 +1761,7 @@ if models:
   - **`GET /api/models/active`** → Liste aller aktiven Modelle (aus `prediction_active_models`)
   - **`POST /api/models/{active_model_id}/activate`** → Aktiviert Modell (in `prediction_active_models`)
   - **`POST /api/models/{active_model_id}/deactivate`** → Deaktiviert Modell
+  - **`PATCH /api/models/{active_model_id}/rename`** → Benennt Modell um (lokal)
   - **`DELETE /api/models/{active_model_id}`** → Löscht Modell (aus DB + lokale Datei)
 - Endpoints für Vorhersagen:
   - **`POST /api/predict`** → Manuelle Vorhersage für einen Coin
@@ -1408,9 +1814,12 @@ if models:
   
   @app.on_event("shutdown")
   async def shutdown():
+      from app.utils.logging_config import get_logger
+      logger = get_logger(__name__)
+      
       # DB-Pool schließen
       await close_pool()
-      print("👋 Service beendet")
+      logger.info("👋 Service beendet")
   ```
 - **Health Endpoint (`GET /api/health`):**
   - Nutze `get_health_status()` aus `metrics.py`
@@ -1725,10 +2134,13 @@ curl http://<coolify-url>:8000/api/metrics
 - [ ] API-Dokumentation erreichbar (`/docs`)
 
 **2. Modell-Verwaltung:**
+- [ ] Verfügbare Modelle werden geladen (für Import)
+- [ ] Modell-Import funktioniert (Download + Speicherung)
 - [ ] Aktive Modelle werden geladen
 - [ ] Modell aktivieren funktioniert
 - [ ] Modell deaktivieren funktioniert
-- [ ] Modell neu laden funktioniert
+- [ ] Modell umbenennen funktioniert
+- [ ] Modell löschen funktioniert (DB + Datei)
 
 **3. Vorhersage-Workflow:**
 - [ ] Manuelle Vorhersage via API funktioniert
@@ -1737,10 +2149,11 @@ curl http://<coolify-url>:8000/api/metrics
 - [ ] Feature-Engineering wird korrekt angewendet
 
 **4. Event-Handler:**
-- [ ] Polling erkennt neue Einträge
+- [ ] LISTEN/NOTIFY funktioniert (Echtzeit)
+- [ ] Polling-Fallback funktioniert
 - [ ] Batch-Verarbeitung funktioniert
 - [ ] Vorhersagen werden automatisch erstellt
-- [ ] Alerts werden ausgelöst (wenn threshold überschritten)
+- [ ] n8n Webhook sendet alle Vorhersagen (mit Modell-Informationen + Alert-Flag)
 
 **5. Edge Cases:**
 - [ ] Zu wenig Historie (< 5 Einträge)
@@ -1795,7 +2208,8 @@ curl http://<coolify-url>:8000/api/metrics
 - [ ] Schritt 4: Konfiguration erstellt
 - [ ] Schritt 5: Datenbank-Verbindung funktioniert
 - [ ] Schritt 6: Datenbank-Modelle implementiert
-- [ ] Schritt 7: Prometheus Metrics erstellt
+- [ ] Schritt 7: Strukturiertes Logging erstellt
+- [ ] Schritt 7.5: Prometheus Metrics erstellt
 
 ### Phase 3: Prediction Engine ✅
 - [ ] Schritt 8: Feature-Engineering funktioniert
