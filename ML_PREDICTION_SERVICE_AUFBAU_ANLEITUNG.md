@@ -700,11 +700,35 @@ async def prepare_features(
     Bereitet Features für einen Coin auf.
     GLEICHE Logik wie beim Training!
     """
-    # 1. Hole Historie
+    # 1. Hole Historie - ⚠️ WICHTIG: Nur benötigte Features laden!
+    # Prüfe welche Features das Modell benötigt
+    required_features = model_config['features']
+    
+    # Basis-Features die immer verfügbar sind (aus coin_metrics)
+    available_columns = [
+        'price_open', 'price_high', 'price_low', 'price_close',
+        'volume_sol',
+        'market_cap_close',  # ⚠️ Nur market_cap_close existiert!
+        'buy_volume_sol', 'sell_volume_sol',
+        'num_buys', 'num_sells',
+        'bonding_curve_pct', 'virtual_sol_reserves',
+        'unique_wallets', 'is_koth'
+    ]
+    
+    # Prüfe ob alle benötigten Features verfügbar sind
+    missing_features = [f for f in required_features if f not in available_columns]
+    if missing_features:
+        raise ValueError(
+            f"Features nicht verfügbar in coin_metrics: {missing_features}\n"
+            f"Verfügbare Features: {available_columns}"
+        )
+    
+    # Hole Historie (nur benötigte Spalten!)
     history = await get_coin_history(
         coin_id=coin_id,
         limit=FEATURE_HISTORY_SIZE,
         phases=model_config.get('phases'),
+        columns=required_features,  # ⚠️ NEU: Nur benötigte Spalten laden!
         pool=pool
     )
     
@@ -714,6 +738,19 @@ async def prepare_features(
     
     if use_engineered_features:
         window_sizes = params.get('feature_engineering_windows', [5, 10, 15])
+        
+        # ⚠️ WICHTIG: Feature-Engineering benötigt bestimmte Basis-Features!
+        # z.B. price_close für price_roc, volume_sol für volume_ratio, etc.
+        # Prüfe ob alle benötigten Basis-Features vorhanden sind
+        required_for_engineering = ['price_close', 'volume_sol', 'market_cap_close']
+        missing_for_engineering = [f for f in required_for_engineering if f not in history.columns]
+        
+        if missing_for_engineering:
+            raise ValueError(
+                f"Feature-Engineering benötigt folgende Features: {missing_for_engineering}\n"
+                f"Verfügbar: {list(history.columns)}"
+            )
+        
         history = create_pump_detection_features(
             history,
             window_sizes=window_sizes
@@ -738,26 +775,56 @@ async def prepare_features(
     return history[features]
 ```
 
-**Funktion `get_coin_history()`:**
+**Funktion `get_coin_history()` - ⚠️ WICHTIG: Verschiedene Metriken berücksichtigen!**
 ```python
 async def get_coin_history(
     coin_id: str,
     limit: int,
     phases: Optional[List[int]],
+    columns: Optional[List[str]] = None,  # ⚠️ NEU: Nur benötigte Spalten laden!
     pool: asyncpg.Pool
 ) -> pd.DataFrame:
-    """Holt Historie für einen Coin"""
+    """
+    Holt Historie für einen Coin.
+    
+    ⚠️ WICHTIG: columns Parameter - nur benötigte Spalten laden!
+    Wenn Modell mit bestimmten Features trainiert wurde, müssen diese verfügbar sein!
+    """
+    # Verfügbare Spalten in coin_metrics (tatsächlich existierende!)
+    available_columns = [
+        'price_open', 'price_high', 'price_low', 'price_close',
+        'volume_sol',
+        'market_cap_close',  # ⚠️ Nur market_cap_close existiert!
+        'buy_volume_sol', 'sell_volume_sol',
+        'num_buys', 'num_sells',
+        'bonding_curve_pct', 'virtual_sol_reserves',
+        'unique_wallets', 'is_koth'
+    ]
+    
+    # Spalten-String für SQL
+    if columns:
+        # Prüfe ob alle Spalten verfügbar sind
+        missing = [c for c in columns if c not in available_columns]
+        if missing:
+            raise ValueError(
+                f"Features nicht verfügbar in coin_metrics: {missing}\n"
+                f"Verfügbare Features: {available_columns}"
+            )
+        columns_str = ", ".join(columns)
+    else:
+        columns_str = "*"
+    
     if phases:
-        query = """
-            SELECT * FROM coin_metrics
+        query = f"""
+            SELECT {columns_str} FROM coin_metrics
             WHERE mint = $1 AND phase_id_at_time = ANY($2::int[])
             ORDER BY timestamp DESC
             LIMIT $3
         """
         rows = await pool.fetch(query, coin_id, phases, limit)
     else:
-        query = """
-            SELECT * FROM coin_metrics
+        query = f"""
+            SELECT {columns_str} FROM coin_metrics
             WHERE mint = $1
             ORDER BY timestamp DESC
             LIMIT $2
@@ -801,6 +868,39 @@ if models:
 4. Implementiere Modell-Validierung
 
 **Vorgehen:**
+- Funktion `download_model_file()`:
+  ```python
+  import aiohttp
+  import os
+  from app.utils.config import MODEL_STORAGE_PATH, TRAINING_SERVICE_API_URL
+  
+  async def download_model_file(model_id: int) -> str:
+      """
+      Lädt Modell-Datei vom Training Service herunter.
+      
+      Returns:
+          Lokaler Pfad zur Modell-Datei
+      """
+      # 1. API-Call zum Training Service
+      download_url = f"{TRAINING_SERVICE_API_URL}/models/{model_id}/download"
+      
+      async with aiohttp.ClientSession() as session:
+          async with session.get(download_url) as response:
+              if response.status != 200:
+                  raise ValueError(f"Modell-Download fehlgeschlagen: {response.status}")
+              
+              # 2. Speichere lokal
+              os.makedirs(MODEL_STORAGE_PATH, exist_ok=True)
+              local_path = os.path.join(MODEL_STORAGE_PATH, f"model_{model_id}.pkl")
+              
+              with open(local_path, 'wb') as f:
+                  async for chunk in response.content.iter_chunked(8192):
+                      f.write(chunk)
+      
+      logger.info(f"✅ Modell {model_id} heruntergeladen: {local_path}")
+      return local_path
+  ```
+
 - Funktion `load_model()`:
   ```python
   import joblib
@@ -850,10 +950,10 @@ if models:
       return load_model(model_file_path)
   ```
 
-**⚠️ WICHTIG: Modell-Dateien müssen verfügbar sein!**
-- `MODEL_STORAGE_PATH` muss auf Verzeichnis mit `.pkl` Dateien zeigen
-- Modell-Dateien müssen vom Training Service erstellt worden sein
-- Shared Storage oder Volume-Mapping nötig
+**⚠️ WICHTIG: Modell-Download!**
+- Modell-Dateien werden vom Training Service heruntergeladen
+- Lokale Speicherung in `MODEL_STORAGE_PATH`
+- Kein Shared Storage nötig (separater Server!)
 
 **Ergebnis:** Modelle können geladen und gecacht werden.
 
@@ -985,34 +1085,123 @@ if models:
 
 ---
 
-### **Schritt 11: Event-Handler (Polling)**
+### **Schritt 11: Event-Handler (LISTEN/NOTIFY + Polling-Fallback)**
+
+**⚠️ WICHTIG: PostgreSQL LISTEN/NOTIFY für Echtzeit!**
+- Primär: LISTEN/NOTIFY für Echtzeit-Kommunikation (< 100ms Latency)
+- Fallback: Polling alle 30s wenn LISTEN/NOTIFY nicht verfügbar
 
 **Was zu tun ist:**
 1. Erstelle `app/prediction/event_handler.py`
-2. Implementiere Polling-Logik (prüft regelmäßig auf neue Einträge)
-3. Implementiere Batch-Verarbeitung
-4. Integriere mit Prediction Engine
+2. Implementiere LISTEN/NOTIFY Listener
+3. Implementiere Polling-Fallback
+4. Implementiere Batch-Verarbeitung
+5. Integriere mit Prediction Engine
 
 **Vorgehen:**
-- Funktion `get_new_coin_entries()`:
+- Klasse `EventHandler`:
   ```python
-  async def get_new_coin_entries(
-      last_processed_timestamp: datetime,
-      pool: asyncpg.Pool
-  ) -> List[Dict]:
-      """
-      Holt neue Einträge aus coin_metrics.
-      """
-      query = """
-          SELECT DISTINCT mint, MAX(timestamp) as latest_timestamp
-          FROM coin_metrics
-          WHERE timestamp > $1
-          GROUP BY mint
-          ORDER BY latest_timestamp ASC
-          LIMIT $2
-      """
-      rows = await pool.fetch(query, last_processed_timestamp, BATCH_SIZE)
-      return [dict(row) for row in rows]
+  import asyncio
+  import json
+  from datetime import datetime, timezone, timedelta
+  from app.database.connection import get_pool, DB_DSN
+  import asyncpg
+  
+  class EventHandler:
+      """Event-Handler mit LISTEN/NOTIFY und Polling-Fallback"""
+      
+      def __init__(self):
+          self.listener_connection = None
+          self.use_listen_notify = True
+          self.batch = []
+          self.batch_lock = asyncio.Lock()
+          self.last_batch_time = datetime.now(timezone.utc)
+          self.running = False
+      
+      async def setup_listener(self):
+          """Setup LISTEN/NOTIFY Listener"""
+          try:
+              # Separate Connection für LISTEN (kann nicht über Pool sein)
+              self.listener_connection = await asyncpg.connect(DB_DSN)
+              
+              # Listener-Funktion
+              async def notification_handler(conn, pid, channel, payload):
+                  """Wird aufgerufen wenn NOTIFY empfangen wird"""
+                  try:
+                      data = json.loads(payload)
+                      await self.add_to_batch(data)
+                  except Exception as e:
+                      logger.error(f"Fehler beim Verarbeiten von Notification: {e}")
+              
+              # Listener registrieren
+              await self.listener_connection.add_listener(
+                  'coin_metrics_insert',
+                  notification_handler
+              )
+              
+              # LISTEN aktivieren
+              await self.listener_connection.execute("LISTEN coin_metrics_insert")
+              
+              logger.info("✅ LISTEN/NOTIFY aktiviert")
+              self.use_listen_notify = True
+              
+          except Exception as e:
+              logger.warning(f"⚠️ LISTEN/NOTIFY nicht verfügbar: {e}")
+              logger.info("→ Fallback auf Polling")
+              self.use_listen_notify = False
+      
+      async def add_to_batch(self, event_data: Dict):
+          """Fügt Event zu Batch hinzu"""
+          async with self.batch_lock:
+              self.batch.append(event_data)
+              
+              # Prüfe ob Batch voll oder Timeout erreicht
+              now = datetime.now(timezone.utc)
+              time_since_last_batch = (now - self.last_batch_time).total_seconds()
+              
+              if len(self.batch) >= BATCH_SIZE or time_since_last_batch >= BATCH_TIMEOUT_SECONDS:
+                  await self.process_batch()
+      
+      async def process_batch(self):
+          """Verarbeitet aktuellen Batch"""
+          async with self.batch_lock:
+              if not self.batch:
+                  return
+              
+              batch_to_process = self.batch.copy()
+              self.batch.clear()
+              self.last_batch_time = datetime.now(timezone.utc)
+          
+          # Verarbeite Batch
+          await self._process_coin_entries(batch_to_process)
+      
+      async def start_polling_fallback(self):
+          """Polling-Fallback wenn LISTEN/NOTIFY nicht verfügbar"""
+          pool = await get_pool()
+          last_processed_timestamp = datetime.now(timezone.utc) - timedelta(hours=1)
+          
+          while self.running:
+              try:
+                  query = """
+                      SELECT DISTINCT mint, MAX(timestamp) as latest_timestamp
+                      FROM coin_metrics
+                      WHERE timestamp > $1
+                      GROUP BY mint
+                      ORDER BY latest_timestamp ASC
+                      LIMIT $2
+                  """
+                  rows = await pool.fetch(query, last_processed_timestamp, BATCH_SIZE)
+                  
+                  if rows:
+                      events = [dict(row) for row in rows]
+                      await self._process_coin_entries(events)
+                      last_processed_timestamp = max(e['latest_timestamp'] for e in events)
+                  
+                  await asyncio.sleep(POLLING_INTERVAL_SECONDS)
+                  
+              except Exception as e:
+                  logger.error(f"Fehler im Polling-Loop: {e}")
+                  await asyncio.sleep(POLLING_INTERVAL_SECONDS)
   ```
 
 - Funktion `process_batch()`:
@@ -1052,22 +1241,15 @@ if models:
                   'probability': result['probability']
               })
               
-              # Prüfe Alerts
-              model_config = next(m for m in active_models if m['id'] == result['model_id'])
-              threshold = model_config.get('alert_threshold', DEFAULT_ALERT_THRESHOLD)
-              
-              if result['probability'] > threshold:
-                  await save_alert(
-                      coin_id=coin_id,
-                      model_id=result['model_id'],
-                      probability=result['probability'],
-                      threshold=threshold,
-                      pool=pool
-                  )
+              # Speichere Vorhersage (ALLE, nicht nur Alerts!)
+              # n8n entscheidet dann, was passiert
       
       # Batch-Insert
       if predictions_to_save:
           await save_predictions_batch(predictions_to_save, pool)
+          
+          # Sende ALLE Vorhersagen an n8n (nicht nur Alerts!)
+          await send_to_n8n(coin_id, timestamp, results)
   ```
 
 - Funktion `start_polling()`:
@@ -1169,10 +1351,12 @@ if models:
 
 **Vorgehen:**
 - Endpoints für Models:
-  - **`GET /api/models/active`** → Liste aller aktiven Modelle
-  - **`POST /api/models/{model_id}/activate`** → Modell aktivieren
-  - **`POST /api/models/{model_id}/deactivate`** → Modell deaktivieren
-  - **`POST /api/models/{model_id}/reload`** → Modell neu laden
+  - **`GET /api/models/available`** → Liste aller verfügbaren Modelle aus `ml_models` (für Import)
+  - **`POST /api/models/import`** → Importiert Modell vom Training Service (Download + Speicherung)
+  - **`GET /api/models/active`** → Liste aller aktiven Modelle (aus `prediction_active_models`)
+  - **`POST /api/models/{active_model_id}/activate`** → Aktiviert Modell (in `prediction_active_models`)
+  - **`POST /api/models/{active_model_id}/deactivate`** → Deaktiviert Modell
+  - **`DELETE /api/models/{active_model_id}`** → Löscht Modell (aus DB + lokale Datei)
 - Endpoints für Vorhersagen:
   - **`POST /api/predict`** → Manuelle Vorhersage für einen Coin
   - **`GET /api/predictions`** → Liste aller Vorhersagen (mit Filtern)
@@ -1214,9 +1398,11 @@ if models:
       health_status["start_time"] = time.time()
       health_status["db_connected"] = True
       
-      # Starte Event-Handler (Polling)
-      from app.prediction.event_handler import start_polling
-      asyncio.create_task(start_polling())
+      # Starte Event-Handler (LISTEN/NOTIFY oder Polling)
+      from app.prediction.event_handler import EventHandler
+      event_handler = EventHandler()
+      await event_handler.start()
+      asyncio.create_task(event_handler._keep_listener_alive() if event_handler.use_listen_notify else event_handler.start_polling_fallback())
       
       print("✅ Service gestartet: DB verbunden, Event-Handler läuft")
   
@@ -1294,8 +1480,37 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App-Code kopieren
 COPY app/ ./app/
 
+# Supervisor Config für zwei Prozesse (FastAPI + Streamlit)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends supervisor && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN printf '[supervisord]\n\
+nodaemon=true\n\
+\n\
+[program:fastapi]\n\
+command=uvicorn app.main:app --host 0.0.0.0 --port 8000\n\
+directory=/app\n\
+autostart=true\n\
+autorestart=true\n\
+stderr_logfile=/dev/stderr\n\
+stderr_logfile_maxbytes=0\n\
+stdout_logfile=/dev/stdout\n\
+stdout_logfile_maxbytes=0\n\
+\n\
+[program:streamlit]\n\
+command=streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0\n\
+directory=/app\n\
+autostart=true\n\
+autorestart=true\n\
+stderr_logfile=/dev/stderr\n\
+stderr_logfile_maxbytes=0\n\
+stdout_logfile=/dev/stdout\n\
+stdout_logfile_maxbytes=0\n\
+' > /etc/supervisor/conf.d/supervisord.conf
+
 # Ports freigeben
-EXPOSE 8000
+EXPOSE 8000 8501
 
 # Health Check
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
@@ -1304,8 +1519,8 @@ HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
 # Graceful Shutdown
 STOPSIGNAL SIGTERM
 
-# Start FastAPI
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start Supervisor (startet beide Prozesse)
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
 ```
 
 **Wichtig:** 
@@ -1365,7 +1580,8 @@ services:
     build: .
     container_name: ml-prediction-service
     ports:
-      - "8000:8000"
+      - "8000:8000"  # FastAPI
+      - "8501:8501"  # Streamlit
     environment:
       # ⚠️ EXTERNE Datenbank (nicht im Docker-Compose!)
       - DB_DSN=postgresql://user:pass@EXTERNE_DB_HOST:5432/crypto
@@ -1493,7 +1709,7 @@ curl http://<coolify-url>:8000/api/metrics
 
 ## ✅ Phase 6: Testing & Optimierung (Schritte 18-19)
 
-### **Schritt 18: End-to-End Testing**
+### **Schritt 19: End-to-End Testing**
 
 **Was zu tun ist:**
 1. Teste kompletten Workflow
@@ -1548,7 +1764,7 @@ curl http://<coolify-url>:8000/api/metrics
 
 ---
 
-### **Schritt 19: Dokumentation & Finalisierung**
+### **Schritt 20: Dokumentation & Finalisierung**
 
 **Was zu tun ist:**
 1. Aktualisiere README.md
@@ -1597,9 +1813,12 @@ curl http://<coolify-url>:8000/api/metrics
 - [ ] Schritt 16: Lokales Testing erfolgreich
 - [ ] Schritt 17: Coolify Deployment läuft
 
-### Phase 6: Testing & Optimierung ✅
-- [ ] Schritt 18: End-to-End Testing erfolgreich
-- [ ] Schritt 19: Dokumentation fertig
+### Phase 6: Streamlit UI ✅
+- [ ] Schritt 18: Streamlit UI erstellt
+
+### Phase 7: Testing & Optimierung ✅
+- [ ] Schritt 19: End-to-End Testing erfolgreich
+- [ ] Schritt 20: Dokumentation fertig
 
 ---
 
