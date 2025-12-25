@@ -99,7 +99,8 @@ async def import_model_endpoint(request: ModelImportRequest):
         logger.info(f"🔍 Prüfe ob Modell {request.model_id} bereits importiert ist...")
         
         # 1. Prüfe ob Modell bereits importiert (VOR Download - spart Zeit)
-        # Verwende direkte DB-Abfrage für atomare Prüfung
+        # Verwende direkte DB-Abfrage für atomare Prüfung (verhindert Race Conditions)
+        from app.database.connection import get_pool
         pool = await get_pool()
         existing_db = await pool.fetchrow("""
             SELECT id, is_active FROM prediction_active_models WHERE model_id = $1
