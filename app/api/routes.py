@@ -20,6 +20,7 @@ from app.database.models import (
     update_alert_threshold, update_n8n_settings, save_prediction, get_predictions, get_latest_prediction, get_model_statistics,
     get_n8n_status_for_model
 )
+from app.database.alert_models import get_alerts, get_alert_details, get_alert_statistics, get_model_alert_statistics
 from app.prediction.engine import predict_coin_all_models
 from app.prediction.model_manager import download_model_file
 from app.utils.metrics import get_health_status, generate_metrics
@@ -762,3 +763,167 @@ async def metrics_endpoint_coolify():
     """Metrics für Coolify (ohne /api Prefix)"""
     return await metrics_endpoint()
 
+
+# ============================================================
+# Alerts Endpoints
+# ============================================================
+
+@router.get("/alerts/statistics")
+async def get_alert_statistics_endpoint(
+    model_id: Optional[int] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None
+):
+    """Alert-Statistiken"""
+    try:
+        result = await get_alert_statistics(
+            model_id=model_id, date_from=date_from, date_to=date_to
+        )
+        return result
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Abrufen der Alert-Statistiken: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/models/alert-statistics")
+async def get_models_alert_statistics_endpoint():
+    """OPTIMIERT: Alert-Statistiken für alle aktiven Modelle (Batch-Query)"""
+    try:
+        result = await get_model_alert_statistics()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Abrufen der Modell-Alert-Statistiken: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/alerts")
+async def get_alerts_endpoint(
+    status: Optional[str] = None,
+    model_id: Optional[int] = None,
+    active_model_id: Optional[int] = None,  # NEU: Filter nach active_model_id
+    coin_id: Optional[str] = None,
+    prediction_type: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    unique_coins: bool = True,
+    limit: int = 100,
+    offset: int = 0
+):
+    """Liste aller Alerts mit Filtern"""
+    try:
+        # Wenn active_model_id gegeben, konvertiere zu model_id
+        if active_model_id and not model_id:
+            pool = await get_db_pool()
+            model_row = await pool.fetchrow("""
+                SELECT model_id FROM prediction_active_models WHERE id = $1
+            """, active_model_id)
+            if model_row:
+                model_id = model_row['model_id']
+        
+        result = await get_alerts(
+            status=status, model_id=model_id, coin_id=coin_id,
+            prediction_type=prediction_type, date_from=date_from, date_to=date_to,
+            unique_coins=unique_coins, limit=limit, offset=offset
+        )
+        return result
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Abrufen der Alerts: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/alerts/{alert_id}")
+async def get_alert_details_endpoint(
+    alert_id: int,
+    chart_before_minutes: int = 10,
+    chart_after_minutes: int = 10
+):
+    """Detaillierte Informationen zu einem Alert"""
+    try:
+        result = await get_alert_details(
+            alert_id=alert_id,
+            chart_before_minutes=chart_before_minutes,
+            chart_after_minutes=chart_after_minutes
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Alert {alert_id} nicht gefunden")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Abrufen der Alert-Details: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/models/{active_model_id}/statistics")
+async def reset_model_statistics_endpoint(active_model_id: int):
+    """Setzt Statistiken für ein Modell zurück (löscht alle Vorhersagen)"""
+    try:
+        pool = await get_db_pool()
+        
+        # Prüfe ob Modell existiert
+        model_row = await pool.fetchrow("""
+            SELECT id FROM prediction_active_models WHERE id = $1
+        """, active_model_id)
+        
+        if not model_row:
+            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
+        
+        # Lösche alle Vorhersagen für dieses Modell
+        deleted_count = await pool.execute("""
+            DELETE FROM predictions WHERE active_model_id = $1
+        """, active_model_id)
+        
+        # Setze total_predictions auf 0
+        await pool.execute("""
+            UPDATE prediction_active_models
+            SET total_predictions = 0,
+                last_prediction_at = NULL,
+                updated_at = NOW()
+            WHERE id = $1
+        """, active_model_id)
+        
+        logger.info(f"✅ Statistiken für Modell {active_model_id} zurückgesetzt ({deleted_count} Vorhersagen gelöscht)")
+        
+        return {
+            "success": True,
+            "active_model_id": active_model_id,
+            "deleted_predictions": deleted_count
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Zurücksetzen der Statistiken: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/models/{active_model_id}/alerts")
+async def delete_model_alerts_endpoint(active_model_id: int):
+    """Löscht alle Alerts für ein Modell"""
+    try:
+        pool = await get_db_pool()
+        
+        # Prüfe ob Modell existiert
+        model_row = await pool.fetchrow("""
+            SELECT id, model_id FROM prediction_active_models WHERE id = $1
+        """, active_model_id)
+        
+        if not model_row:
+            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
+        
+        model_id = model_row['model_id']
+        
+        # Lösche alle Alerts für dieses Modell (über prediction_id)
+        deleted_count = await pool.execute("""
+            DELETE FROM alert_evaluations
+            WHERE prediction_id IN (
+                SELECT id FROM predictions WHERE active_model_id = $1
+            )
+        """, active_model_id)
+        
+        logger.info(f"✅ Alerts für Modell {active_model_id} gelöscht ({deleted_count} Alerts gelöscht)")
+        
+        return {
+            "success": True,
+            "active_model_id": active_model_id,
+            "deleted_alerts": deleted_count
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Löschen der Alerts: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

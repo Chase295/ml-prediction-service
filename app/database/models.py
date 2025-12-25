@@ -7,7 +7,7 @@ CRUD-Operationen für:
 - ml_models (nur lesen, vom Training Service)
 """
 from typing import List, Dict, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import asyncpg
 import json
 from app.database.connection import get_pool
@@ -205,6 +205,10 @@ async def get_active_models(include_inactive: bool = False) -> List[Dict[str, An
                 COUNT(*) FILTER (
                     WHERE p.prediction = 1 
                     AND p.probability >= COALESCE(pam.alert_threshold, 0.7)
+                    AND EXISTS (
+                        SELECT 1 FROM alert_evaluations ae 
+                        WHERE ae.prediction_id = p.id
+                    )
                 ) as alerts_count
             FROM prediction_active_models pam
             LEFT JOIN predictions p ON p.active_model_id = pam.id
@@ -300,89 +304,108 @@ async def import_model(
     """
     pool = await get_pool()
     
-    # 1. Prüfe ob Modell bereits importiert
-    existing = await pool.fetchrow("""
-        SELECT id, is_active FROM prediction_active_models WHERE model_id = $1
-    """, model_id)
-    
-    if existing:
-        existing_id = existing['id']
-        is_active = existing.get('is_active', False)
-        status = "aktiv" if is_active else "pausiert"
-        raise ValueError(f"Modell {model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status})")
-    
-    # 2. Hole Metadaten aus ml_models
-    model_data = await get_model_from_training_service(model_id)
-    if not model_data:
-        raise ValueError(f"Modell {model_id} nicht gefunden oder nicht READY")
-    
-    # 3. Konvertiere JSONB-Felder zu JSON-Strings (asyncpg benötigt explizite Konvertierung)
-    import json
-    from app.utils.logging_config import get_logger
-    logger = get_logger(__name__)
-    
-    # asyncpg erwartet JSON-Strings für JSONB-Felder, nicht Python-Listen/Dicts
-    features_data = model_data['features']
-    if isinstance(features_data, list):
-        features_json = json.dumps(features_data)
-    elif isinstance(features_data, str):
-        features_json = features_data
-    else:
-        features_json = json.dumps(features_data)
-    
-    phases_data = model_data['phases']
-    if phases_data is None:
-        phases_json = None
-    elif isinstance(phases_data, list):
-        phases_json = json.dumps(phases_data)
-    elif isinstance(phases_data, str):
-        phases_json = phases_data
-    else:
-        phases_json = json.dumps(phases_data)
-    
-    params_data = model_data['params']
-    if params_data is None:
-        params_json = None
-    elif isinstance(params_data, dict):
-        params_json = json.dumps(params_data)
-    elif isinstance(params_data, str):
-        params_json = params_data
-    else:
-        params_json = json.dumps(params_data)
-    
-    logger.debug(f"Features JSON Type: {type(features_json)}, Value: {features_json[:50] if isinstance(features_json, str) else features_json}")
-    
-    # 4. Erstelle Eintrag in prediction_active_models
-    # Nutze jsonb() Funktion in PostgreSQL für explizite Konvertierung
-    active_model_id = await pool.fetchval("""
-        INSERT INTO prediction_active_models (
-            model_id, model_name, model_type,
-            target_variable, target_operator, target_value,
-            future_minutes, price_change_percent, target_direction,
-            features, phases, params,
-            local_model_path, model_file_url,
-            is_active, activated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13, $14, $15, NOW())
-        RETURNING id
-    """,
-        model_id,
-        model_data['name'],
-        model_data['model_type'],
-        model_data['target_variable'],
-        model_data['target_operator'],
-        model_data['target_value'],
-        model_data['future_minutes'],
-        model_data['price_change_percent'],
-        model_data['target_direction'],
-        features_json,  # JSONB (als JSON-String)
-        phases_json,  # JSONB (als JSON-String oder NULL)
-        params_json,  # JSONB (als JSON-String oder NULL)
-        local_model_path,
-        model_file_url,
-        True  # is_active
-    )
-    
-    return active_model_id
+    # WICHTIG: Verwende Transaktion mit Lock, um Race Conditions zu verhindern
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Prüfe ob Modell bereits importiert (mit Lock für Race Condition Prevention)
+            existing = await conn.fetchrow("""
+                SELECT id, is_active FROM prediction_active_models 
+                WHERE model_id = $1
+                FOR UPDATE
+            """, model_id)
+            
+            if existing:
+                existing_id = existing['id']
+                is_active = existing.get('is_active', False)
+                status = "aktiv" if is_active else "pausiert"
+                raise ValueError(f"Modell {model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status})")
+            
+            # 2. Hole Metadaten aus ml_models
+            model_data = await get_model_from_training_service(model_id)
+            if not model_data:
+                raise ValueError(f"Modell {model_id} nicht gefunden oder nicht READY")
+            
+            # 3. Konvertiere JSONB-Felder zu JSON-Strings (asyncpg benötigt explizite Konvertierung)
+            import json
+            from app.utils.logging_config import get_logger
+            logger = get_logger(__name__)
+            
+            # asyncpg erwartet JSON-Strings für JSONB-Felder, nicht Python-Listen/Dicts
+            features_data = model_data['features']
+            if isinstance(features_data, list):
+                features_json = json.dumps(features_data)
+            elif isinstance(features_data, str):
+                features_json = features_data
+            else:
+                features_json = json.dumps(features_data)
+            
+            phases_data = model_data['phases']
+            if phases_data is None:
+                phases_json = None
+            elif isinstance(phases_data, list):
+                phases_json = json.dumps(phases_data)
+            elif isinstance(phases_data, str):
+                phases_json = phases_data
+            else:
+                phases_json = json.dumps(phases_data)
+            
+            params_data = model_data['params']
+            if params_data is None:
+                params_json = None
+            elif isinstance(params_data, dict):
+                params_json = json.dumps(params_data)
+            elif isinstance(params_data, str):
+                params_json = params_data
+            else:
+                params_json = json.dumps(params_data)
+            
+            logger.debug(f"Features JSON Type: {type(features_json)}, Value: {features_json[:50] if isinstance(features_json, str) else features_json}")
+            
+            # 4. Erstelle Eintrag in prediction_active_models (innerhalb der Transaktion)
+            # Nutze jsonb() Funktion in PostgreSQL für explizite Konvertierung
+            try:
+                active_model_id = await conn.fetchval("""
+                    INSERT INTO prediction_active_models (
+                        model_id, model_name, model_type,
+                        target_variable, target_operator, target_value,
+                        future_minutes, price_change_percent, target_direction,
+                        features, phases, params,
+                        local_model_path, model_file_url,
+                        is_active, activated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13, $14, $15, NOW())
+                    RETURNING id
+                """,
+                    model_id,
+                    model_data['name'],
+                    model_data['model_type'],
+                    model_data['target_variable'],
+                    model_data['target_operator'],
+                    model_data['target_value'],
+                    model_data['future_minutes'],
+                    model_data['price_change_percent'],
+                    model_data['target_direction'],
+                    features_json,  # JSONB (als JSON-String)
+                    phases_json,  # JSONB (als JSON-String oder NULL)
+                    params_json,  # JSONB (als JSON-String oder NULL)
+                    local_model_path,
+                    model_file_url,
+                    True  # is_active
+                )
+            except asyncpg.UniqueViolationError as e:
+                # Falls doch ein Duplikat erstellt wurde (z.B. durch Race Condition)
+                logger.error(f"❌ UniqueViolationError beim Import von Modell {model_id}: {e}")
+                # Prüfe nochmal
+                existing_after = await conn.fetchrow("""
+                    SELECT id, is_active FROM prediction_active_models WHERE model_id = $1
+                """, model_id)
+                if existing_after:
+                    existing_id = existing_after['id']
+                    is_active = existing_after.get('is_active', False)
+                    status = "aktiv" if is_active else "pausiert"
+                    raise ValueError(f"Modell {model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status})")
+                raise
+            
+            return active_model_id
 
 async def activate_model(active_model_id: int) -> bool:
     """
@@ -639,6 +662,33 @@ async def save_prediction(
                 updated_at = NOW()
             WHERE id = $1
         """, active_model_id)
+    
+    # Erstelle Alert wenn nötig (asynchron, nicht blockierend)
+    try:
+        from app.utils.logging_config import get_logger
+        logger = get_logger(__name__)
+        logger.info(f"🔍 Rufe create_alert_if_needed auf für Prediction {prediction_id} (prediction={prediction}, probability={probability:.2%})")
+        
+        alert_id = await create_alert_if_needed(
+            prediction_id=prediction_id,
+            coin_id=coin_id,
+            data_timestamp=data_timestamp,
+            model_id=model_id,
+            active_model_id=active_model_id,
+            prediction=prediction,
+            probability=probability,
+            pool=pool
+        )
+        
+        if alert_id:
+            logger.info(f"✅ Alert {alert_id} erfolgreich erstellt für Prediction {prediction_id}")
+        else:
+            logger.debug(f"ℹ️ Kein Alert erstellt für Prediction {prediction_id} (create_alert_if_needed gab None zurück)")
+    except Exception as e:
+        # Logge Fehler, aber blockiere nicht das Speichern der Vorhersage
+        from app.utils.logging_config import get_logger
+        logger = get_logger(__name__)
+        logger.error(f"❌ Fehler beim Erstellen des Alerts für Vorhersage {prediction_id}: {e}", exc_info=True)
     
     return prediction_id
 
@@ -1170,3 +1220,222 @@ async def get_n8n_status_for_model(active_model_id: int) -> Dict[str, Any]:
         'last_error': error_message,
         'n8n_url': n8n_url[:50] + '...' if len(n8n_url) > 50 else n8n_url
     }
+
+# ============================================================
+# alert_evaluations - CRUD Operationen
+# ============================================================
+
+async def get_coin_metrics_at_timestamp(
+    coin_id: str,
+    timestamp: datetime,
+    pool: Optional[asyncpg.Pool] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Holt alle Metriken für einen Coin zu einem bestimmten Zeitpunkt.
+    
+    Args:
+        coin_id: Coin-ID (mint)
+        timestamp: Zeitpunkt
+        pool: Optional: DB-Pool (wird erstellt falls nicht vorhanden)
+        
+    Returns:
+        Dict mit allen Metriken oder None wenn nicht gefunden
+    """
+    if pool is None:
+        pool = await get_pool()
+    
+    # ⚠️ WICHTIG: coin_metrics hat nur market_cap_close (nicht market_cap_open) und volume_sol (nicht volume_usd)!
+    row = await pool.fetchrow("""
+        SELECT 
+            price_open, price_high, price_low, price_close,
+            market_cap_close,
+            volume_sol,
+            buy_volume_sol, sell_volume_sol,
+            num_buys, num_sells,
+            unique_wallets,
+            phase_id_at_time as phase_id
+        FROM coin_metrics
+        WHERE mint = $1
+          AND timestamp <= $2
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """, coin_id, timestamp)
+    
+    if not row:
+        return None
+    
+    # ⚠️ WICHTIG: coin_metrics hat nur market_cap_close (nicht market_cap_open) und volume_sol (nicht volume_usd)!
+    return {
+        'price_open': float(row['price_open']) if row['price_open'] else None,
+        'price_high': float(row['price_high']) if row['price_high'] else None,
+        'price_low': float(row['price_low']) if row['price_low'] else None,
+        'price_close': float(row['price_close']) if row['price_close'] else None,
+        'market_cap_open': None,  # Existiert nicht in coin_metrics
+        'market_cap_close': float(row['market_cap_close']) if row['market_cap_close'] else None,
+        'volume_sol': float(row['volume_sol']) if row['volume_sol'] else None,
+        'volume_usd': None,  # Existiert nicht in coin_metrics (nur volume_sol)
+        'buy_volume_sol': float(row['buy_volume_sol']) if row['buy_volume_sol'] else None,
+        'sell_volume_sol': float(row['sell_volume_sol']) if row['sell_volume_sol'] else None,
+        'num_buys': int(row['num_buys']) if row['num_buys'] else None,
+        'num_sells': int(row['num_sells']) if row['num_sells'] else None,
+        'unique_wallets': int(row['unique_wallets']) if row['unique_wallets'] else None,
+        'phase_id': int(row['phase_id']) if row['phase_id'] else None
+    }
+
+async def create_alert_if_needed(
+    prediction_id: int,
+    coin_id: str,
+    data_timestamp: datetime,
+    model_id: int,
+    active_model_id: Optional[int],
+    prediction: int,
+    probability: float,
+    pool: Optional[asyncpg.Pool] = None
+) -> Optional[int]:
+    """
+    Erstellt einen Alert-Eintrag wenn prediction=1 und probability >= alert_threshold.
+    
+    Args:
+        prediction_id: ID der Vorhersage
+        coin_id: Coin-ID
+        data_timestamp: Zeitstempel der Daten
+        model_id: Modell-ID
+        active_model_id: Aktive Modell-ID
+        prediction: Vorhersage (0 oder 1)
+        probability: Wahrscheinlichkeit
+        pool: Optional: DB-Pool
+        
+    Returns:
+        Alert-ID wenn erstellt, None wenn kein Alert nötig
+    """
+    from app.utils.logging_config import get_logger
+    logger = get_logger(__name__)
+    
+    if prediction != 1:
+        logger.debug(f"⚠️ Kein Alert: prediction={prediction} (nur 1 erstellt Alerts)")
+        return None  # Nur positive Vorhersagen können Alerts sein
+    
+    logger.info(f"🔍 create_alert_if_needed aufgerufen: prediction_id={prediction_id}, coin_id={coin_id[:20]}..., probability={probability:.2%}, active_model_id={active_model_id}")
+    
+    if pool is None:
+        pool = await get_pool()
+    
+    # Hole Modell-Konfiguration für alert_threshold
+    if active_model_id:
+        model_row = await pool.fetchrow("""
+            SELECT 
+                alert_threshold,
+                target_variable, target_operator, target_value,
+                future_minutes, price_change_percent, target_direction
+            FROM prediction_active_models
+            WHERE id = $1
+        """, active_model_id)
+    else:
+        # Fallback: Hole aus ml_models (wenn kein active_model_id)
+        model_row = await pool.fetchrow("""
+            SELECT 
+                target_variable, target_operator, target_value,
+                future_minutes, price_change_percent, target_direction
+            FROM ml_models
+            WHERE id = $1
+        """, model_id)
+        if model_row:
+            # Verwende DEFAULT_ALERT_THRESHOLD
+            from app.utils.config import DEFAULT_ALERT_THRESHOLD
+            model_row = dict(model_row)
+            model_row['alert_threshold'] = DEFAULT_ALERT_THRESHOLD
+    
+    if not model_row:
+        logger.warning(f"⚠️ Kein Alert: Modell nicht gefunden (model_id={model_id}, active_model_id={active_model_id})")
+        return None  # Modell nicht gefunden
+    
+    alert_threshold = float(model_row.get('alert_threshold', 0.7))
+    
+    if probability < alert_threshold:
+        logger.info(f"⚠️ Kein Alert: probability={probability:.2%} < threshold={alert_threshold:.2%}")
+        return None  # Threshold nicht erreicht
+    
+    logger.info(f"🔍 Prüfe Alert-Erstellung: prediction={prediction}, probability={probability:.2%}, threshold={alert_threshold:.2%}")
+    
+    # Bestimme prediction_type
+    future_minutes = model_row.get('future_minutes')
+    target_operator = model_row.get('target_operator')
+    
+    if future_minutes is not None:
+        prediction_type = 'time_based'
+        evaluation_timestamp = data_timestamp + timedelta(minutes=int(future_minutes))
+    elif target_operator is not None:
+        prediction_type = 'classic'
+        # Für klassische Vorhersagen: Auswertung nach 5 Minuten (konfigurierbar)
+        evaluation_timestamp = data_timestamp + timedelta(minutes=5)
+    else:
+        logger.warning(f"⚠️ Kein Alert: Unbekannter prediction_type (future_minutes={future_minutes}, target_operator={target_operator})")
+        return None  # Unbekannter Typ
+    
+    # Hole Metriken zum Zeitpunkt des Alerts
+    metrics = await get_coin_metrics_at_timestamp(coin_id, data_timestamp, pool)
+    if not metrics or metrics.get('price_close') is None:
+        logger.warning(f"⚠️ Kein Alert: Keine Metriken verfügbar für Coin {coin_id[:20]}... zum Zeitpunkt {data_timestamp}")
+        return None  # Keine Metriken verfügbar
+    
+    logger.info(f"✅ Metriken gefunden für Coin {coin_id[:20]}... (price_close: {metrics.get('price_close')})")
+    
+    # Erstelle Alert-Eintrag
+    alert_id = await pool.fetchval("""
+        INSERT INTO alert_evaluations (
+            prediction_id, coin_id, model_id,
+            prediction_type, probability,
+            target_variable, future_minutes, price_change_percent, target_direction,
+            target_operator, target_value,
+            alert_timestamp, evaluation_timestamp,
+            price_close_at_alert, price_open_at_alert, price_high_at_alert, price_low_at_alert,
+            market_cap_close_at_alert, market_cap_open_at_alert,
+            volume_sol_at_alert, volume_usd_at_alert,
+            buy_volume_sol_at_alert, sell_volume_sol_at_alert,
+            num_buys_at_alert, num_sells_at_alert,
+            unique_wallets_at_alert, phase_id_at_alert,
+            status
+        ) VALUES (
+            $1, $2, $3,
+            $4, $5,
+            $6, $7, $8, $9,
+            $10, $11,
+            $12, $13,
+            $14, $15, $16, $17,
+            $18, $19,
+            $20, $21,
+            $22, $23,
+            $24, $25,
+            $26, $27,
+            'pending'
+        )
+        RETURNING id
+    """,
+        prediction_id, coin_id, model_id,
+        prediction_type, probability,
+        model_row.get('target_variable'),
+        future_minutes,
+        float(model_row.get('price_change_percent')) if model_row.get('price_change_percent') else None,
+        model_row.get('target_direction'),
+        target_operator,
+        float(model_row.get('target_value')) if model_row.get('target_value') else None,
+        data_timestamp,
+        evaluation_timestamp,
+        metrics['price_close'],
+        metrics.get('price_open'),
+        metrics.get('price_high'),
+        metrics.get('price_low'),
+        metrics.get('market_cap_close'),
+        metrics.get('market_cap_open'),
+        metrics.get('volume_sol'),
+        metrics.get('volume_usd'),
+        metrics.get('buy_volume_sol'),
+        metrics.get('sell_volume_sol'),
+        metrics.get('num_buys'),
+        metrics.get('num_sells'),
+        metrics.get('unique_wallets'),
+        metrics.get('phase_id')
+    )
+    
+    logger.info(f"✅ Alert {alert_id} erfolgreich erstellt für Vorhersage {prediction_id} (Coin: {coin_id[:20]}..., Probability: {probability:.2%}, Threshold: {alert_threshold:.2%})")
+    return alert_id

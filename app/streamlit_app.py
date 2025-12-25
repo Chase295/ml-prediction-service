@@ -88,12 +88,14 @@ def api_patch(endpoint: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         st.error(f"❌ Verbindungsfehler: {e}")
         return None
 
-def api_delete(endpoint: str) -> bool:
+def api_delete(endpoint: str) -> Optional[Dict[str, Any]]:
     """DELETE Request zur API"""
     try:
-        response = requests.delete(f"{API_BASE_URL}{endpoint}", timeout=10)
-        if response.status_code == 200:
-            return True
+        response = requests.delete(f"{API_BASE_URL}{endpoint}", timeout=30)
+        if response.status_code in [200, 204]:
+            if response.content:
+                return response.json()
+            return {"success": True}
         else:
             error_text = response.text
             try:
@@ -102,10 +104,31 @@ def api_delete(endpoint: str) -> bool:
             except:
                 pass
             st.error(f"❌ API Fehler ({response.status_code}): {error_text}")
-            return False
+            return None
     except Exception as e:
         st.error(f"❌ Verbindungsfehler: {e}")
-        return False
+        return None
+
+def api_delete(endpoint: str) -> Optional[Dict[str, Any]]:
+    """DELETE Request zur API"""
+    try:
+        response = requests.delete(f"{API_BASE_URL}{endpoint}", timeout=30)
+        if response.status_code in [200, 204]:
+            if response.content:
+                return response.json()
+            return {"success": True}
+        else:
+            error_text = response.text
+            try:
+                error_json = response.json()
+                error_text = error_json.get("detail", error_text)
+            except:
+                pass
+            st.error(f"❌ API Fehler ({response.status_code}): {error_text}")
+            return None
+    except Exception as e:
+        st.error(f"❌ Verbindungsfehler: {e}")
+        return None
 
 # ============================================================
 # Seiten
@@ -405,12 +428,43 @@ def page_overview():
                 else:
                     st.metric("Klassisch", "—", help="Klassisches Modell (keine zeitbasierte Vorhersage)")
             
-            # Kompakte Info-Zeile mit Alert-Threshold
-            info_line_col1, info_line_col2 = st.columns([3, 1])
+            # Kompakte Info-Zeile mit Alert-Threshold und Löschen-Button
+            info_line_col1, info_line_col2, info_line_col3 = st.columns([2, 1, 1])
             with info_line_col1:
                 st.caption("")  # Spacer
             with info_line_col2:
                 st.caption(f"🚨 Alert: {alert_threshold:.0%}", help=f"Alert-Threshold: {alert_threshold:.0%} (zum Ändern: ✏️ Button)")
+            with info_line_col3:
+                # Prüfe ob bereits bestätigt wurde
+                delete_key = f"delete_confirmed_{model_id}"
+                if delete_key not in st.session_state:
+                    st.session_state[delete_key] = False
+                
+                if not st.session_state[delete_key]:
+                    if st.button("🗑️ Löschen", key=f"delete_{model_id}", help="Statistiken und Alerts löschen", use_container_width=True, type="secondary"):
+                        st.session_state[delete_key] = True
+                        st.rerun()
+                else:
+                    st.warning("⚠️ Bestätigung erforderlich")
+                    if st.button("✅ Bestätigen", key=f"confirm_delete_{model_id}", use_container_width=True, type="primary"):
+                        # Lösche Statistiken (Vorhersagen)
+                        stats_result = api_delete(f"/models/{model_id}/statistics")
+                        # Lösche Alerts
+                        alerts_result = api_delete(f"/models/{model_id}/alerts")
+                        
+                        # Lösche Bestätigungsstatus
+                        if delete_key in st.session_state:
+                            del st.session_state[delete_key]
+                        
+                        if stats_result and alerts_result:
+                            st.success("✅ Statistiken und Alerts erfolgreich gelöscht")
+                            st.rerun()
+                        else:
+                            st.error("❌ Fehler beim Löschen")
+                    if st.button("❌ Abbrechen", key=f"cancel_delete_{model_id}", use_container_width=True):
+                        if delete_key in st.session_state:
+                            del st.session_state[delete_key]
+                        st.rerun()
             
             # Zusätzliche Infos
             info_row1, info_row2 = st.columns(2)
@@ -1184,10 +1238,78 @@ def page_stats():
                     "Typ": st.column_config.TextColumn("Typ", width="small")
                 }
             )
+    
+    st.divider()
+    
+    # ============================================================
+    # Alert-Auswertung pro Modell (OPTIMIERT)
+    # ============================================================
+    st.subheader("📊 Alert-Auswertung pro Modell")
+    st.caption("Zeigt für jedes Modell: Positive/Negative Vorhersagen und Alert-Erfolgsrate")
+    
+    # Lade optimierte Alert-Statistiken
+    alert_stats_data = api_get("/models/alert-statistics")
+    if alert_stats_data and models_data and models_data.get("models"):
+        models = models_data.get("models", [])
+        
+        # Erstelle erweiterte Tabelle mit Alert-Auswertung
+        extended_stats_data = []
+        for model in models:
+            model_id = model.get("id")
+            model_name = model.get("custom_name") or model.get("name", f"ID: {model_id}")
+            model_stats = model.get("stats", {})
+            
+            total = model_stats.get("total_predictions", 0)
+            positive = model_stats.get("positive_predictions", 0)
+            negative = model_stats.get("negative_predictions", 0)
+            
+            # Hole Alert-Statistiken für dieses Modell
+            # API gibt Keys als Strings zurück (JSON-Kompatibilität)
+            alert_stats = alert_stats_data.get(str(model_id), {})
+            alerts_success = alert_stats.get("alerts_success", 0) if isinstance(alert_stats, dict) else 0
+            alerts_failed = alert_stats.get("alerts_failed", 0) if isinstance(alert_stats, dict) else 0
+            alerts_pending = alert_stats.get("alerts_pending", 0) if isinstance(alert_stats, dict) else 0
+            alerts_total = alert_stats.get("alerts_total", 0) if isinstance(alert_stats, dict) else 0
+            
+            # Berechne Erfolgsrate (nur für ausgewertete Alerts)
+            alerts_evaluated = alerts_success + alerts_failed
+            success_rate = (alerts_success / alerts_evaluated * 100) if alerts_evaluated > 0 else 0
+            
+            extended_stats_data.append({
+                "Modell": model_name,
+                "ID": model_id,
+                "✅ Positiv": positive,
+                "❌ Negativ": negative,
+                "🚨 Alerts (Gesamt)": alerts_total,
+                "✅ Erfolgreich": alerts_success,
+                "❌ Fehlgeschlagen": alerts_failed,
+                "⏳ Laufend": alerts_pending,
+                "📈 Erfolgsrate": f"{success_rate:.1f}%" if alerts_evaluated > 0 else "N/A"
+            })
+        
+        if extended_stats_data:
+            import pandas as pd
+            df_extended = pd.DataFrame(extended_stats_data)
+            st.dataframe(
+                df_extended,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Modell": st.column_config.TextColumn("Modell", width="medium"),
+                    "ID": st.column_config.NumberColumn("ID", width="small"),
+                    "✅ Positiv": st.column_config.NumberColumn("✅ Positiv", width="small"),
+                    "❌ Negativ": st.column_config.NumberColumn("❌ Negativ", width="small"),
+                    "🚨 Alerts (Gesamt)": st.column_config.NumberColumn("🚨 Alerts", width="small"),
+                    "✅ Erfolgreich": st.column_config.NumberColumn("✅ Erfolgreich", width="small"),
+                    "❌ Fehlgeschlagen": st.column_config.NumberColumn("❌ Fehlgeschlagen", width="small"),
+                    "⏳ Laufend": st.column_config.NumberColumn("⏳ Laufend", width="small"),
+                    "📈 Erfolgsrate": st.column_config.TextColumn("📈 Erfolgsrate", width="medium")
+                }
+            )
         else:
-            st.info("ℹ️ Keine Modell-Statistiken verfügbar")
+            st.info("ℹ️ Noch keine Alert-Statistiken verfügbar")
     else:
-        st.info("ℹ️ Keine aktiven Modelle gefunden")
+        st.info("ℹ️ Konnte Alert-Statistiken nicht laden")
     
     st.divider()
     
@@ -2073,6 +2195,53 @@ def page_details():
     # Detaillierte Auswertung
     st.subheader("📊 Detaillierte Auswertung")
     
+    # Erklärung: Was bedeutet Positiv/Negativ?
+    with st.expander("ℹ️ Was bedeutet 'Positiv' und 'Negativ'?", expanded=False):
+        if model.get("future_minutes"):
+            # Zeitbasierte Vorhersage
+            direction_text = "steigt" if model.get('target_direction') == "up" else "fällt"
+            direction_emoji = "📈" if model.get('target_direction') == "up" else "📉"
+            target_var = model.get('target_variable', 'price_close')
+            future_min = model.get('future_minutes', 0)
+            change_pct = model.get('price_change_percent', 0)
+            
+            st.markdown(f"""
+            **✅ Positiv (prediction = 1):**
+            - Das Modell sagt voraus, dass **{target_var}** in den nächsten **{future_min} Minuten** um mindestens **{change_pct}% {direction_text}** {direction_emoji}
+            - **Bedeutung:** Die Bedingung wird wahrscheinlich erfüllt → Potenzial für Gewinn
+            - **Aktion:** Coin könnte interessant sein für einen Trade
+            
+            **❌ Negativ (prediction = 0):**
+            - Das Modell sagt voraus, dass **{target_var}** in den nächsten **{future_min} Minuten** **NICHT** um mindestens **{change_pct}% {direction_text}** wird
+            - **Bedeutung:** Die Bedingung wird wahrscheinlich NICHT erfüllt → Kein signifikantes Potenzial
+            - **Aktion:** Coin ist weniger interessant für einen Trade
+            """)
+        else:
+            # Klassische Vorhersage
+            target_var = model.get('target_variable', 'N/A')
+            operator = model.get('target_operator', 'N/A')
+            value = model.get('target_value', 'N/A')
+            condition = f"{target_var} {operator} {value}"
+            
+            st.markdown(f"""
+            **✅ Positiv (prediction = 1):**
+            - Das Modell sagt voraus, dass die Bedingung **{condition}** erfüllt wird
+            - **Bedeutung:** Die Bedingung wird wahrscheinlich erfüllt → Potenzial für Gewinn
+            - **Aktion:** Coin könnte interessant sein für einen Trade
+            
+            **❌ Negativ (prediction = 0):**
+            - Das Modell sagt voraus, dass die Bedingung **{condition}** **NICHT** erfüllt wird
+            - **Bedeutung:** Die Bedingung wird wahrscheinlich NICHT erfüllt → Kein signifikantes Potenzial
+            - **Aktion:** Coin ist weniger interessant für einen Trade
+            """)
+        
+        st.info("""
+        **💡 Wichtig:** 
+        - Die Vorhersage ist eine **Wahrscheinlichkeit**, keine Garantie!
+        - **Wahrscheinlichkeit (probability):** Zeigt, wie sicher sich das Modell ist (0% = unsicher, 100% = sehr sicher)
+        - **Alerts:** Werden nur bei positiven Vorhersagen mit hoher Wahrscheinlichkeit (≥ Alert-Schwelle) gesendet
+        """)
+    
     # Lade Statistiken
     stats = api_get(f"/models/{model_id}/statistics")
     
@@ -2087,11 +2256,19 @@ def page_details():
             positive = stats.get("positive_predictions", 0)
             total = stats.get("total_predictions", 1)
             positive_pct = (positive / total * 100) if total > 0 else 0
-            st.metric("✅ Positiv", f"{positive} ({positive_pct:.1f}%)", help="Anzahl positiver Vorhersagen (prediction = 1)")
+            if model.get("future_minutes"):
+                help_text = f"Anzahl positiver Vorhersagen: {model.get('target_variable')} wird in {model.get('future_minutes')} Min um {model.get('price_change_percent')}% {'steigen' if model.get('target_direction') == 'up' else 'fallen'}"
+            else:
+                help_text = f"Anzahl positiver Vorhersagen: {model.get('target_variable')} {model.get('target_operator')} {model.get('target_value')}"
+            st.metric("✅ Positiv", f"{positive} ({positive_pct:.1f}%)", help=help_text)
         with col3:
             negative = stats.get("negative_predictions", 0)
             negative_pct = (negative / total * 100) if total > 0 else 0
-            st.metric("❌ Negativ", f"{negative} ({negative_pct:.1f}%)", help="Anzahl negativer Vorhersagen (prediction = 0)")
+            if model.get("future_minutes"):
+                help_text = f"Anzahl negativer Vorhersagen: {model.get('target_variable')} wird in {model.get('future_minutes')} Min NICHT um {model.get('price_change_percent')}% {'steigen' if model.get('target_direction') == 'up' else 'fallen'}"
+            else:
+                help_text = f"Anzahl negativer Vorhersagen: {model.get('target_variable')} {model.get('target_operator')} {model.get('target_value')} wird NICHT erfüllt"
+            st.metric("❌ Negativ", f"{negative} ({negative_pct:.1f}%)", help=help_text)
         with col4:
             st.metric("🪙 Coins", stats.get("unique_coins", 0), help="Anzahl verschiedener Coins")
         
@@ -2224,6 +2401,652 @@ def page_details():
             st.session_state["page"] = "overview"
             st.rerun()
 
+def page_alerts():
+    """Alert-Übersichtsseite"""
+    st.title("🚨 Alerts")
+    
+    # Info-Box
+    st.info("""
+    **📖 Anleitung:** 
+    Diese Seite zeigt die neuesten Alerts (positive Vorhersagen mit hoher Wahrscheinlichkeit).
+    Standardmäßig werden die **neuesten 50 Alerts** angezeigt. Nutze die Filter, um gezielt nach bestimmten Alerts zu suchen.
+    """)
+    
+    # Filter-Sektion
+    with st.expander("🔍 Filter", expanded=True):
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            result_filter = st.selectbox(
+                "📊 Ergebnis",
+                options=["Alle", "✅ Bestanden", "❌ Nicht bestanden"],
+                key="alert_result_filter",
+                help="Filter nach Ergebnis (bestanden/nicht bestanden)"
+            )
+            status_value = None
+            if result_filter == "✅ Bestanden":
+                status_value = "success"
+            elif result_filter == "❌ Nicht bestanden":
+                status_value = "failed"
+            else:
+                # Wenn "Alle", zeige zusätzlichen Status-Filter
+                status_filter = st.selectbox(
+                    "📊 Status",
+                    options=["Alle", "🟢 Laufend", "✅ Erfolgreich", "❌ Fehlgeschlagen", "⏸️ Abgelaufen"],
+                    key="alert_status_filter",
+                    help="Filter nach Alert-Status"
+                )
+                if status_filter == "🟢 Laufend":
+                    status_value = "pending"
+                elif status_filter == "✅ Erfolgreich":
+                    status_value = "success"
+                elif status_filter == "❌ Fehlgeschlagen":
+                    status_value = "failed"
+                elif status_filter == "⏸️ Abgelaufen":
+                    status_value = "expired"
+        
+        with col2:
+            # Lade aktive Modelle für Dropdown
+            active_models_data = api_get("/models/active")
+            active_models = active_models_data.get("models", []) if active_models_data else []
+            model_options = ["Alle"] + [f"{m.get('custom_name') or m.get('name')} (ID: {m.get('id')})" for m in active_models]
+            
+            model_selected = st.selectbox(
+                "🔮 Modell",
+                options=model_options,
+                key="alert_model_filter",
+                help="Filter nach aktivem Modell"
+            )
+            model_id_filter = None
+            if model_selected != "Alle" and active_models:
+                selected_name = model_selected.split("(ID: ")[1].rstrip(")") if "(ID: " in model_selected else None
+                if selected_name:
+                    try:
+                        model_id_filter = int(selected_name)
+                    except:
+                        pass
+        
+        with col3:
+            prediction_type_filter = st.selectbox(
+                "🎯 Vorhersage-Typ",
+                options=["Alle", "⏰ Zeitbasiert", "🎯 Klassisch"],
+                key="alert_type_filter",
+                help="Filter nach Vorhersage-Typ"
+            )
+            type_value = None
+            if prediction_type_filter == "⏰ Zeitbasiert":
+                type_value = "time_based"
+            elif prediction_type_filter == "🎯 Klassisch":
+                type_value = "classic"
+        
+        with col4:
+            coin_id_filter = st.text_input(
+                "🪙 Coin-ID",
+                placeholder="Optional",
+                key="alert_coin_filter",
+                help="Filter nach Coin-ID (mint)"
+            )
+            coin_id_value = coin_id_filter if coin_id_filter else None
+        
+        with col5:
+            limit_filter = st.number_input(
+                "📋 Anzahl",
+                min_value=10,
+                max_value=500,
+                value=50,
+                step=10,
+                key="alert_limit_filter",
+                help="Anzahl der neuesten Alerts anzeigen"
+            )
+    
+    # Lade Alerts
+    params = {}
+    if status_value:
+        params['status'] = status_value
+    if model_id_filter:
+        params['active_model_id'] = model_id_filter  # WICHTIG: active_model_id, nicht model_id!
+    if coin_id_value:
+        params['coin_id'] = coin_id_value
+    if type_value:
+        params['prediction_type'] = type_value
+    params['unique_coins'] = False  # Zeige alle Alerts, nicht nur ältesten pro Coin (für neueste X)
+    params['limit'] = limit_filter
+    params['offset'] = 0
+    
+    data = api_get("/alerts", params=params)
+    if not data:
+        st.warning("⚠️ Konnte Alerts nicht laden")
+        return
+    
+    alerts = data.get("alerts", [])
+    total = data.get("total", 0)
+    pending = data.get("pending", 0)
+    success = data.get("success", 0)
+    failed = data.get("failed", 0)
+    expired = data.get("expired", 0)
+    
+    # Statistiken-Karten
+    st.subheader("📊 Alert-Statistiken")
+    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
+    
+    with stat_col1:
+        st.metric("Gesamt", total, help="Gesamtanzahl aller Alerts (nach Filter)")
+    with stat_col2:
+        st.metric("🟢 Laufend", pending, help="Alerts die noch ausgewertet werden")
+    with stat_col3:
+        st.metric("✅ Erfolgreich", success, help="Alerts die ihr Ziel erreicht haben")
+    with stat_col4:
+        st.metric("❌ Fehlgeschlagen", failed, help="Alerts die ihr Ziel nicht erreicht haben")
+    with stat_col5:
+        st.metric("⏸️ Abgelaufen", expired, help="Alerts ohne verfügbare Daten")
+    
+    st.divider()
+    
+    if total == 0:
+        st.info("ℹ️ Keine Alerts gefunden. Alerts werden automatisch erstellt, wenn eine positive Vorhersage mit hoher Wahrscheinlichkeit gemacht wird.")
+        return
+    
+    # Alert-Liste (Karten-Ansicht)
+    st.subheader(f"📋 Alerts ({len(alerts)} angezeigt)")
+    
+    # Erstelle Karten in einem Grid (2 Spalten)
+    cols = st.columns(2)
+    
+    for idx, alert in enumerate(alerts):
+        col = cols[idx % 2]
+        
+        with col:
+            # Status-Badge
+            status = alert.get('status', 'pending')
+            if status == 'pending':
+                status_badge = "🟢 Laufend"
+                status_color = "green"
+            elif status == 'success':
+                status_badge = "✅ Erfolgreich"
+                status_color = "green"
+            elif status == 'failed':
+                status_badge = "❌ Fehlgeschlagen"
+                status_color = "red"
+            elif status == 'expired':
+                status_badge = "⏸️ Abgelaufen"
+                status_color = "gray"
+            else:
+                status_badge = "❓ Unbekannt"
+                status_color = "gray"
+            
+            # Alert-Zeitpunkt
+            alert_ts = alert.get('alert_timestamp')
+            if isinstance(alert_ts, str):
+                alert_ts = datetime.fromisoformat(alert_ts.replace('Z', '+00:00'))
+            alert_time_str = alert_ts.strftime("%d.%m.%Y %H:%M:%S") if isinstance(alert_ts, datetime) else str(alert_ts)[:19]
+            
+            # Ziel-Text
+            prediction_type = alert.get('prediction_type', 'time_based')
+            if prediction_type == 'time_based':
+                future_min = alert.get('future_minutes', 0)
+                change_pct = alert.get('price_change_percent', 0)
+                direction = alert.get('target_direction', 'up')
+                direction_emoji = "📈" if direction == 'up' else "📉"
+                target_text = f"{future_min} Min, {direction_emoji} {change_pct}%"
+            else:
+                target_var = alert.get('target_variable', 'N/A')
+                operator = alert.get('target_operator', 'N/A')
+                value = alert.get('target_value', 'N/A')
+                target_text = f"{target_var} {operator} {value}"
+            
+            # Verbleibende Zeit (bei pending)
+            remaining_seconds = alert.get('remaining_seconds')
+            remaining_text = ""
+            if remaining_seconds is not None and remaining_seconds > 0:
+                minutes = remaining_seconds // 60
+                seconds = remaining_seconds % 60
+                remaining_text = f" ({minutes} Min {seconds} Sek)"
+            
+            # Karte
+            with st.container():
+                st.markdown(f"### {alert.get('coin_id', 'N/A')[:20]}...")
+                
+                info_col1, info_col2 = st.columns(2)
+                with info_col1:
+                    st.caption(f"**Modell:** {alert.get('model_name', 'N/A')}")
+                    st.caption(f"**Typ:** {'⏰ Zeitbasiert' if prediction_type == 'time_based' else '🎯 Klassisch'}")
+                with info_col2:
+                    st.caption(f"**Wahrscheinlichkeit:** {alert.get('probability', 0):.1%}")
+                    st.caption(f"**Status:** {status_badge}")
+                
+                st.caption(f"**Ziel:** {target_text}")
+                st.caption(f"**Alert-Zeitpunkt:** {alert_time_str}{remaining_text}")
+                
+                # Anzahl weiterer Alerts
+                other_count = alert.get('other_alerts_count', 0)
+                if other_count > 0:
+                    st.caption(f"📋 +{other_count} weitere Alert(s) für diesen Coin")
+                
+                # Details-Button
+                if st.button("📋 Details anzeigen", key=f"alert_details_{alert['id']}", use_container_width=True):
+                    st.session_state['alert_details_id'] = alert['id']
+                    st.session_state['page'] = 'alert_details'
+                    st.rerun()
+                
+                # Dünne graue Linie zur Trennung
+                if idx < len(alerts) - 1:
+                    st.markdown("<hr style='margin: 10px 0; border: none; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
+
+def page_alert_details():
+    """Alert-Detail-Seite"""
+    alert_id = st.session_state.get("alert_details_id")
+    if not alert_id:
+        st.warning("⚠️ Kein Alert ausgewählt")
+        return
+    
+    # Lade Alert-Details
+    data = api_get(f"/alerts/{alert_id}", params={"chart_before_minutes": 10, "chart_after_minutes": 10})
+    if not data:
+        st.error("❌ Konnte Alert-Details nicht laden")
+        return
+    
+    alert = data.get('alert', {})
+    coin_values_at_alert = data.get('coin_values_at_alert', {})
+    coin_values_at_evaluation = data.get('coin_values_at_evaluation')
+    price_history = data.get('price_history', [])
+    volume_history = data.get('volume_history', [])
+    market_cap_history = data.get('market_cap_history', [])
+    other_alerts = data.get('other_alerts', [])
+    statistics = data.get('statistics', {})
+    
+    coin_id = alert.get('coin_id', 'N/A')
+    model_name = alert.get('model_name', 'N/A')
+    status = alert.get('status', 'pending')
+    
+    # Status-Badge
+    if status == 'pending':
+        status_badge = "🟢 Laufend"
+    elif status == 'success':
+        status_badge = "✅ Erfolgreich"
+    elif status == 'failed':
+        status_badge = "❌ Fehlgeschlagen"
+    elif status == 'expired':
+        status_badge = "⏸️ Abgelaufen"
+    else:
+        status_badge = "❓ Unbekannt"
+    
+    st.title(f"📋 Alert-Details: {coin_id[:30]}...")
+    st.markdown(f"**Status:** {status_badge} | **Modell:** {model_name}")
+    
+    st.divider()
+    
+    # Alert-Informationen
+    st.subheader("📝 Alert-Informationen")
+    info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+    
+    with info_col1:
+        st.markdown("**Alert-ID**")
+        st.write(f"#{alert_id}")
+    with info_col2:
+        st.markdown("**Modell-ID**")
+        st.write(f"#{alert.get('model_id', 'N/A')}")
+    with info_col3:
+        st.markdown("**Vorhersage-Typ**")
+        prediction_type = alert.get('prediction_type', 'time_based')
+        type_emoji = "⏰" if prediction_type == 'time_based' else "🎯"
+        type_text = "Zeitbasiert" if prediction_type == 'time_based' else "Klassisch"
+        st.write(f"{type_emoji} {type_text}")
+    with info_col4:
+        st.markdown("**Wahrscheinlichkeit**")
+        st.write(f"{alert.get('probability', 0):.1%}")
+    
+    # Ziel-Konfiguration
+    st.markdown("**🎯 Ziel-Konfiguration**")
+    if prediction_type == 'time_based':
+        config_col1, config_col2, config_col3, config_col4 = st.columns(4)
+        with config_col1:
+            st.write(f"**Variable:** {alert.get('target_variable', 'N/A')}")
+        with config_col2:
+            st.write(f"**Zeitraum:** {alert.get('future_minutes', 0)} Minuten")
+        with config_col3:
+            st.write(f"**Min. Änderung:** {alert.get('price_change_percent', 0)}%")
+        with config_col4:
+            direction = alert.get('target_direction', 'up')
+            direction_text = "📈 Steigt" if direction == "up" else "📉 Fällt"
+            st.write(f"**Richtung:** {direction_text}")
+    else:
+        config_col1, config_col2, config_col3 = st.columns(3)
+        with config_col1:
+            st.write(f"**Variable:** {alert.get('target_variable', 'N/A')}")
+        with config_col2:
+            st.write(f"**Operator:** {alert.get('target_operator', 'N/A')}")
+        with config_col3:
+            st.write(f"**Wert:** {alert.get('target_value', 'N/A')}")
+    
+    st.divider()
+    
+    # Coin-Werte zum Zeitpunkt des Alerts
+    st.subheader("💰 Coin-Werte zum Zeitpunkt des Alerts")
+    if coin_values_at_alert:
+        values_col1, values_col2, values_col3 = st.columns(3)
+        
+        with values_col1:
+            st.markdown("**Preis**")
+            st.write(f"Open: {coin_values_at_alert.get('price_open', 'N/A')}")
+            st.write(f"High: {coin_values_at_alert.get('price_high', 'N/A')}")
+            st.write(f"Low: {coin_values_at_alert.get('price_low', 'N/A')}")
+            st.write(f"Close: {coin_values_at_alert.get('price_close', 'N/A')}")
+        
+        with values_col2:
+            st.markdown("**Market Cap**")
+            st.write(f"Open: {coin_values_at_alert.get('market_cap_open', 'N/A')}")
+            st.write(f"Close: {coin_values_at_alert.get('market_cap_close', 'N/A')}")
+            st.markdown("**Volume**")
+            st.write(f"SOL: {coin_values_at_alert.get('volume_sol', 'N/A')}")
+            st.write(f"USD: {coin_values_at_alert.get('volume_usd', 'N/A')}")
+        
+        with values_col3:
+            st.markdown("**Buy/Sell**")
+            st.write(f"Buy Volume: {coin_values_at_alert.get('buy_volume_sol', 'N/A')}")
+            st.write(f"Sell Volume: {coin_values_at_alert.get('sell_volume_sol', 'N/A')}")
+            st.write(f"Buys: {coin_values_at_alert.get('num_buys', 'N/A')}")
+            st.write(f"Sells: {coin_values_at_alert.get('num_sells', 'N/A')}")
+            st.write(f"Unique Wallets: {coin_values_at_alert.get('unique_wallets', 'N/A')}")
+            st.write(f"Phase: {coin_values_at_alert.get('phase_id', 'N/A')}")
+    
+    st.divider()
+    
+    # Status & Auswertung
+    st.subheader("📊 Status & Auswertung")
+    
+    alert_ts = alert.get('alert_timestamp')
+    if isinstance(alert_ts, str):
+        alert_ts = datetime.fromisoformat(alert_ts.replace('Z', '+00:00'))
+    eval_ts = alert.get('evaluation_timestamp')
+    if eval_ts:
+        if isinstance(eval_ts, str):
+            eval_ts = datetime.fromisoformat(eval_ts.replace('Z', '+00:00'))
+    
+    status_col1, status_col2, status_col3 = st.columns(3)
+    
+    with status_col1:
+        st.markdown("**⏰ Zeit-Informationen**")
+        alert_time_str = alert_ts.strftime("%d.%m.%Y %H:%M:%S") if isinstance(alert_ts, datetime) else str(alert_ts)[:19]
+        st.write(f"**Alert erstellt:** {alert_time_str}")
+        if eval_ts:
+            eval_time_str = eval_ts.strftime("%d.%m.%Y %H:%M:%S") if isinstance(eval_ts, datetime) else str(eval_ts)[:19]
+            st.write(f"**Auswertungs-Zeitpunkt:** {eval_time_str}")
+            
+            # Verbleibende Zeit oder abgelaufen
+            if status == 'pending':
+                now = datetime.now(timezone.utc)
+                remaining = (eval_ts - now).total_seconds()
+                if remaining > 0:
+                    minutes = int(remaining // 60)
+                    seconds = int(remaining % 60)
+                    st.write(f"**Verbleibende Zeit:** {minutes} Min {seconds} Sek")
+                else:
+                    st.write("**Status:** Wird ausgewertet...")
+            else:
+                evaluated_at = alert.get('evaluated_at')
+                if evaluated_at:
+                    if isinstance(evaluated_at, str):
+                        evaluated_at = datetime.fromisoformat(evaluated_at.replace('Z', '+00:00'))
+                    eval_done_str = evaluated_at.strftime("%d.%m.%Y %H:%M:%S") if isinstance(evaluated_at, datetime) else str(evaluated_at)[:19]
+                    st.write(f"**Ausgewertet am:** {eval_done_str}")
+    
+    with status_col2:
+        st.markdown("**📈 Ergebnis**")
+        if status in ('success', 'failed') and coin_values_at_evaluation:
+            price_at_alert = coin_values_at_alert.get('price_close')
+            price_at_eval = coin_values_at_evaluation.get('price_close')
+            
+            if price_at_alert and price_at_eval:
+                st.write(f"**Preis zum Alert:** {price_at_alert}")
+                st.write(f"**Preis nach Ablauf:** {price_at_eval}")
+                
+                if prediction_type == 'time_based':
+                    actual_change = alert.get('actual_price_change_pct')
+                    target_change = alert.get('price_change_percent', 0)
+                    if actual_change is not None:
+                        st.write(f"**Tatsächliche Änderung:** {actual_change:.2f}%")
+                        st.write(f"**Ziel:** {target_change:.2f}%")
+                        if status == 'success':
+                            st.success(f"✅ Ziel erreicht! ({actual_change:.2f}% >= {target_change:.2f}%)")
+                        else:
+                            st.error(f"❌ Ziel nicht erreicht ({actual_change:.2f}% < {target_change:.2f}%)")
+                else:
+                    actual_value = alert.get('actual_value_at_evaluation')
+                    target_value = alert.get('target_value')
+                    operator = alert.get('target_operator')
+                    if actual_value is not None and target_value is not None:
+                        st.write(f"**Tatsächlicher Wert:** {actual_value}")
+                        st.write(f"**Ziel:** {target_value}")
+                        if status == 'success':
+                            st.success(f"✅ Bedingung erfüllt! ({actual_value} {operator} {target_value})")
+                        else:
+                            st.error(f"❌ Bedingung nicht erfüllt")
+        elif status == 'pending':
+            st.info("⏳ Alert wird noch ausgewertet...")
+        else:
+            st.warning("⚠️ Keine Auswertungsdaten verfügbar")
+    
+    with status_col3:
+        st.markdown("**📊 Statistiken**")
+        model_total = statistics.get('model_total_alerts', 0)
+        model_success = statistics.get('model_success_count', 0)
+        model_failed = statistics.get('model_failed_count', 0)
+        success_rate = statistics.get('model_success_rate', 0)
+        
+        st.write(f"**Gesamt Alerts (Modell):** {model_total}")
+        st.write(f"**Erfolgreich:** {model_success}")
+        st.write(f"**Fehlgeschlagen:** {model_failed}")
+        st.write(f"**Erfolgsrate:** {success_rate:.1f}%")
+    
+    st.divider()
+    
+    # Charts
+    if price_history:
+        st.subheader("📊 Preis-Chart")
+        
+        # Erstelle DataFrame
+        df_price = pd.DataFrame(price_history)
+        if not df_price.empty and 'timestamp' in df_price.columns:
+            df_price['timestamp'] = pd.to_datetime(df_price['timestamp'])
+            df_price = df_price.sort_values('timestamp')
+            
+            # Chart mit Plotly
+            fig = go.Figure()
+            
+            # Preis-Linie
+            fig.add_trace(go.Scatter(
+                x=df_price['timestamp'],
+                y=df_price['price_close'],
+                mode='lines',
+                name='Price Close',
+                line=dict(color='blue', width=2)
+            ))
+            
+            # High/Low Bereich
+            if 'price_high' in df_price.columns and 'price_low' in df_price.columns:
+                fig.add_trace(go.Scatter(
+                    x=df_price['timestamp'],
+                    y=df_price['price_high'],
+                    mode='lines',
+                    name='Price High',
+                    line=dict(color='green', width=1, dash='dash'),
+                    opacity=0.5
+                ))
+                fig.add_trace(go.Scatter(
+                    x=df_price['timestamp'],
+                    y=df_price['price_low'],
+                    mode='lines',
+                    name='Price Low',
+                    line=dict(color='red', width=1, dash='dash'),
+                    opacity=0.5,
+                    fill='tonexty',
+                    fillcolor='rgba(0,0,255,0.1)'
+                ))
+            
+            # Markierungen (verwende add_shape + add_annotation statt add_vline für bessere Timestamp-Kompatibilität)
+            if isinstance(alert_ts, datetime):
+                alert_ts_pd = pd.Timestamp(alert_ts)
+                # Vertikale Linie
+                fig.add_shape(
+                    type="line",
+                    x0=alert_ts_pd, x1=alert_ts_pd,
+                    y0=0, y1=1, yref="paper",
+                    line=dict(color="green", width=2, dash="dash")
+                )
+                # Annotation
+                fig.add_annotation(
+                    x=alert_ts_pd,
+                    y=1.02,
+                    yref="paper",
+                    text="🟢 Alert",
+                    showarrow=False,
+                    font=dict(color="green", size=12)
+                )
+            if eval_ts and isinstance(eval_ts, datetime):
+                eval_ts_pd = pd.Timestamp(eval_ts)
+                # Vertikale Linie
+                fig.add_shape(
+                    type="line",
+                    x0=eval_ts_pd, x1=eval_ts_pd,
+                    y0=0, y1=1, yref="paper",
+                    line=dict(color="red", width=2, dash="dash")
+                )
+                # Annotation
+                fig.add_annotation(
+                    x=eval_ts_pd,
+                    y=1.02,
+                    yref="paper",
+                    text="🔴 Auswertung",
+                    showarrow=False,
+                    font=dict(color="red", size=12)
+                )
+            
+            # Ziel-Preis (bei time_based)
+            if prediction_type == 'time_based' and coin_values_at_alert.get('price_close'):
+                target_price = float(coin_values_at_alert['price_close'])
+                direction = alert.get('target_direction', 'up')
+                change_pct = alert.get('price_change_percent', 0)
+                if direction == 'up':
+                    target_price = target_price * (1 + change_pct / 100)
+                else:
+                    target_price = target_price * (1 - change_pct / 100)
+                fig.add_hline(y=target_price, line_dash="dot", line_color="orange", annotation_text="🎯 Ziel")
+            
+            fig.update_layout(
+                title="Preis-Entwicklung",
+                xaxis_title="Zeit",
+                yaxis_title="Preis",
+                hovermode='x unified',
+                height=400
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Weitere Charts (Volume, Market Cap) in Expander
+    if volume_history or market_cap_history:
+        with st.expander("📊 Weitere Charts (Volume, Market Cap)", expanded=False):
+            if volume_history:
+                st.markdown("**Volume-Chart**")
+                df_volume = pd.DataFrame(volume_history)
+                if not df_volume.empty and 'timestamp' in df_volume.columns:
+                    df_volume['timestamp'] = pd.to_datetime(df_volume['timestamp'])
+                    df_volume = df_volume.sort_values('timestamp')
+                    
+                    fig_volume = go.Figure()
+                    if 'volume_sol' in df_volume.columns:
+                        fig_volume.add_trace(go.Scatter(
+                            x=df_volume['timestamp'],
+                            y=df_volume['volume_sol'],
+                            mode='lines',
+                            name='Volume SOL',
+                            line=dict(color='blue')
+                        ))
+                    if 'volume_usd' in df_volume.columns:
+                        fig_volume.add_trace(go.Scatter(
+                            x=df_volume['timestamp'],
+                            y=df_volume['volume_usd'],
+                            mode='lines',
+                            name='Volume USD',
+                            line=dict(color='green')
+                        ))
+                    
+                    fig_volume.update_layout(
+                        title="Volume-Entwicklung",
+                        xaxis_title="Zeit",
+                        yaxis_title="Volume",
+                        height=300
+                    )
+                    st.plotly_chart(fig_volume, use_container_width=True)
+            
+            if market_cap_history:
+                st.markdown("**Market Cap-Chart**")
+                df_mcap = pd.DataFrame(market_cap_history)
+                if not df_mcap.empty and 'timestamp' in df_mcap.columns:
+                    df_mcap['timestamp'] = pd.to_datetime(df_mcap['timestamp'])
+                    df_mcap = df_mcap.sort_values('timestamp')
+                    
+                    fig_mcap = go.Figure()
+                    if 'market_cap_close' in df_mcap.columns:
+                        fig_mcap.add_trace(go.Scatter(
+                            x=df_mcap['timestamp'],
+                            y=df_mcap['market_cap_close'],
+                            mode='lines',
+                            name='Market Cap',
+                            line=dict(color='purple')
+                        ))
+                    
+                    fig_mcap.update_layout(
+                        title="Market Cap-Entwicklung",
+                        xaxis_title="Zeit",
+                        yaxis_title="Market Cap",
+                        height=300
+                    )
+                    st.plotly_chart(fig_mcap, use_container_width=True)
+    
+    # Weitere Alerts für diesen Coin
+    if other_alerts:
+        st.divider()
+        st.subheader(f"📋 Weitere Alerts für diesen Coin ({len(other_alerts)})")
+        
+        for other_alert in other_alerts:
+            other_status = other_alert.get('status', 'pending')
+            if other_status == 'pending':
+                other_status_badge = "🟢 Laufend"
+            elif other_status == 'success':
+                other_status_badge = "✅ Erfolgreich"
+            elif other_status == 'failed':
+                other_status_badge = "❌ Fehlgeschlagen"
+            else:
+                other_status_badge = "❓ Unbekannt"
+            
+            other_alert_ts = other_alert.get('alert_timestamp')
+            if isinstance(other_alert_ts, str):
+                other_alert_ts = datetime.fromisoformat(other_alert_ts.replace('Z', '+00:00'))
+            other_alert_time_str = other_alert_ts.strftime("%d.%m.%Y %H:%M:%S") if isinstance(other_alert_ts, datetime) else str(other_alert_ts)[:19]
+            
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**Modell:** {other_alert.get('model_name', 'N/A')} | **Status:** {other_status_badge} | **Wahrscheinlichkeit:** {other_alert.get('probability', 0):.1%}")
+                    st.caption(f"**Zeitpunkt:** {other_alert_time_str}")
+                with col2:
+                    if st.button("📋 Details", key=f"other_alert_{other_alert['id']}", use_container_width=True):
+                        st.session_state['alert_details_id'] = other_alert['id']
+                        st.rerun()
+                
+                if other_alert != other_alerts[-1]:
+                    st.markdown("<hr style='margin: 10px 0; border: none; border-top: 1px solid #e0e0e0;'>", unsafe_allow_html=True)
+    
+    st.divider()
+    
+    # Zurück-Button
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("← Zurück zu Alerts", use_container_width=True):
+            st.session_state.pop("alert_details_id", None)
+            st.session_state["page"] = "alerts"
+            st.rerun()
+
 # ============================================================
 # Main App
 # ============================================================
@@ -2239,6 +3062,7 @@ def main():
         "📥 Modell importieren": "import",
         "🔮 Vorhersage": "predict",
         "📋 Vorhersagen": "predictions",
+        "🚨 Alerts": "alerts",
         "📊 Statistiken": "stats",
         "📈 Metrics": "metrics",
         "📜 Logs": "logs"
@@ -2251,10 +3075,12 @@ def main():
     # Bestimme aktuelle page
     current_page_value = st.session_state.get('page', 'overview')
     
-    # Wenn page nicht in Sidebar ist (z.B. 'details'), zeige entsprechende Seite in Sidebar
+    # Wenn page nicht in Sidebar ist (z.B. 'details', 'alert_details'), zeige entsprechende Seite in Sidebar
     sidebar_page_value = current_page_value
     if current_page_value == 'details':
         sidebar_page_value = 'overview'
+    elif current_page_value == 'alert_details':
+        sidebar_page_value = 'alerts'
     elif current_page_value not in pages.values():
         sidebar_page_value = 'overview'
     
@@ -2281,6 +3107,17 @@ def main():
                 st.session_state.pop('details_model_id', None)
                 st.rerun()
     
+    if current_page_value == 'alert_details':
+        alert_id = st.session_state.get('alert_details_id')
+        if alert_id:
+            st.sidebar.markdown("---")
+            st.sidebar.markdown("**🚨 Alert-Details**")
+            st.sidebar.caption(f"Alert ID: {alert_id}")
+            if st.sidebar.button("← Zurück zu Alerts", key="back_to_alerts", use_container_width=True):
+                st.session_state['page'] = 'alerts'
+                st.session_state.pop('alert_details_id', None)
+                st.rerun()
+    
     # Health Check
     health = api_get("/health")
     if health:
@@ -2298,6 +3135,10 @@ def main():
         page_predict()
     elif st.session_state['page'] == 'predictions':
         page_predictions()
+    elif st.session_state['page'] == 'alerts':
+        page_alerts()
+    elif st.session_state['page'] == 'alert_details':
+        page_alert_details()
     elif st.session_state['page'] == 'stats':
         page_stats()
     elif st.session_state['page'] == 'metrics':

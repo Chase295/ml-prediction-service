@@ -99,6 +99,107 @@ async def startup():
         except Exception as e:
             logger.warning(f"⚠️ Migration-Fehler (kann ignoriert werden wenn Spalten bereits existieren): {e}")
         
+        # Migration: alert_evaluations Tabelle erstellen (falls nicht vorhanden)
+        try:
+            # Prüfe ob Tabelle existiert
+            table_exists = await pool.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'alert_evaluations'
+                )
+            """)
+            
+            if not table_exists:
+                # Erstelle Tabelle
+                await pool.execute("""
+                    CREATE TABLE alert_evaluations (
+                        id BIGSERIAL PRIMARY KEY,
+                        prediction_id BIGINT NOT NULL REFERENCES predictions(id) ON DELETE CASCADE,
+                        coin_id VARCHAR(255) NOT NULL,
+                        model_id BIGINT NOT NULL,
+                        prediction_type VARCHAR(20) NOT NULL CHECK (prediction_type IN ('time_based', 'classic')),
+                        probability NUMERIC(5, 4) NOT NULL CHECK (probability >= 0.0 AND probability <= 1.0),
+                        target_variable VARCHAR(100),
+                        future_minutes INTEGER,
+                        price_change_percent NUMERIC(10, 4),
+                        target_direction VARCHAR(10) CHECK (target_direction IN ('up', 'down')),
+                        target_operator VARCHAR(10) CHECK (target_operator IN ('>', '<', '>=', '<=', '=')),
+                        target_value NUMERIC(20, 2),
+                        alert_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                        price_close_at_alert NUMERIC(20, 8) NOT NULL,
+                        price_open_at_alert NUMERIC(20, 8),
+                        price_high_at_alert NUMERIC(20, 8),
+                        price_low_at_alert NUMERIC(20, 8),
+                        market_cap_close_at_alert NUMERIC(20, 2),
+                        market_cap_open_at_alert NUMERIC(20, 2),
+                        volume_sol_at_alert NUMERIC(20, 2),
+                        volume_usd_at_alert NUMERIC(20, 2),
+                        buy_volume_sol_at_alert NUMERIC(20, 2),
+                        sell_volume_sol_at_alert NUMERIC(20, 2),
+                        num_buys_at_alert INTEGER,
+                        num_sells_at_alert INTEGER,
+                        unique_wallets_at_alert INTEGER,
+                        phase_id_at_alert INTEGER,
+                        evaluation_timestamp TIMESTAMP WITH TIME ZONE,
+                        price_close_at_evaluation NUMERIC(20, 8),
+                        price_open_at_evaluation NUMERIC(20, 8),
+                        price_high_at_evaluation NUMERIC(20, 8),
+                        price_low_at_evaluation NUMERIC(20, 8),
+                        market_cap_close_at_evaluation NUMERIC(20, 2),
+                        market_cap_open_at_evaluation NUMERIC(20, 2),
+                        volume_sol_at_evaluation NUMERIC(20, 2),
+                        volume_usd_at_evaluation NUMERIC(20, 2),
+                        buy_volume_sol_at_evaluation NUMERIC(20, 2),
+                        sell_volume_sol_at_evaluation NUMERIC(20, 2),
+                        num_buys_at_evaluation INTEGER,
+                        num_sells_at_evaluation INTEGER,
+                        unique_wallets_at_evaluation INTEGER,
+                        phase_id_at_evaluation INTEGER,
+                        actual_price_change_pct NUMERIC(10, 4),
+                        actual_value_at_evaluation NUMERIC(20, 2),
+                        status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'success', 'failed', 'expired', 'not_applicable')),
+                        evaluated_at TIMESTAMP WITH TIME ZONE,
+                        evaluation_note TEXT,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                
+                # Erstelle Indizes
+                await pool.execute("""
+                    CREATE INDEX idx_alert_evaluations_coin_timestamp 
+                    ON alert_evaluations(coin_id, alert_timestamp ASC);
+                    
+                    CREATE INDEX idx_alert_evaluations_status 
+                    ON alert_evaluations(status) WHERE status = 'pending';
+                    
+                    CREATE INDEX idx_alert_evaluations_prediction 
+                    ON alert_evaluations(prediction_id);
+                    
+                    CREATE INDEX idx_alert_evaluations_type 
+                    ON alert_evaluations(prediction_type);
+                    
+                    CREATE INDEX idx_alert_evaluations_evaluation_timestamp 
+                    ON alert_evaluations(evaluation_timestamp) WHERE status = 'pending';
+                """)
+                
+                logger.info("✅ Migration: alert_evaluations Tabelle erstellt")
+            else:
+                logger.info("✅ Migration: alert_evaluations Tabelle bereits vorhanden")
+                
+                # Migration: probability Spalte hinzufügen (falls nicht vorhanden)
+                try:
+                    await pool.execute("""
+                        ALTER TABLE alert_evaluations 
+                        ADD COLUMN IF NOT EXISTS probability NUMERIC(5, 4) CHECK (probability >= 0.0 AND probability <= 1.0)
+                    """)
+                    logger.info("✅ Migration: probability Spalte in alert_evaluations überprüft")
+                except Exception as e:
+                    logger.warning(f"⚠️ Migration-Fehler bei probability Spalte: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ Migration-Fehler bei alert_evaluations: {e}")
+        
         # Health Status initialisieren
         init_health_status()
         logger.info("✅ Health Status initialisiert")
@@ -141,7 +242,25 @@ async def startup():
         # Speichere Event-Handler in app.state für späteren Zugriff
         app.state.event_handler = event_handler
         
-        logger.info("✅ Service gestartet: DB verbunden, Event-Handler läuft")
+        # Starte Alert-Auswertungs-Job (Hintergrund-Task)
+        from app.database.alert_models import evaluate_pending_alerts
+        
+        async def alert_evaluation_loop():
+            """Hintergrund-Job: Wertet alle ausstehenden Alerts aus"""
+            while True:
+                try:
+                    await asyncio.sleep(60)  # Alle 60 Sekunden
+                    stats = await evaluate_pending_alerts(batch_size=100)
+                    if stats['evaluated'] > 0:
+                        logger.info(f"📊 Alert-Auswertung: {stats['evaluated']} Alerts ausgewertet ({stats['success']} erfolgreich, {stats['failed']} fehlgeschlagen, {stats['expired']} abgelaufen)")
+                except Exception as e:
+                    logger.error(f"❌ Fehler im Alert-Auswertungs-Job: {e}", exc_info=True)
+                    await asyncio.sleep(60)  # Warte auch bei Fehler
+        
+        asyncio.create_task(alert_evaluation_loop())
+        logger.info("✅ Alert-Auswertungs-Job gestartet")
+        
+        logger.info("✅ Service gestartet: DB verbunden, Event-Handler läuft, Alert-Auswertung aktiv")
     except Exception as e:
         logger.error(f"❌ Fehler beim Startup: {e}", exc_info=True)
         raise
