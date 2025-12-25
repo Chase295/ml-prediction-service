@@ -1,0 +1,39 @@
+services:
+  ml-prediction:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ml-prediction-service
+    ports:
+      - "${PORT:-8000}:8000"  # FastAPI (Port aus Environment Variable)
+    environment:
+      # ⚠️ EXTERNE Datenbank (nicht im Docker-Compose!)
+      - DB_DSN=${DB_DSN}
+      - API_PORT=${API_PORT:-8000}
+      - MODEL_STORAGE_PATH=/app/models
+      - POLLING_INTERVAL_SECONDS=${POLLING_INTERVAL_SECONDS:-30}
+      - BATCH_SIZE=${BATCH_SIZE:-50}
+      - BATCH_TIMEOUT_SECONDS=${BATCH_TIMEOUT_SECONDS:-5}
+      - FEATURE_HISTORY_SIZE=${FEATURE_HISTORY_SIZE:-20}
+      - MAX_CONCURRENT_PREDICTIONS=${MAX_CONCURRENT_PREDICTIONS:-10}
+      - MODEL_CACHE_SIZE=${MODEL_CACHE_SIZE:-10}
+      - TRAINING_SERVICE_API_URL=${TRAINING_SERVICE_API_URL}
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL}
+      - N8N_WEBHOOK_TIMEOUT=${N8N_WEBHOOK_TIMEOUT:-5}
+      - DEFAULT_ALERT_THRESHOLD=${DEFAULT_ALERT_THRESHOLD:-0.7}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-text}
+    volumes:
+      - ml-prediction-models:/app/models  # Persistent Volume für Modelle
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  ml-prediction-models:
+    driver: local
+

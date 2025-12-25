@@ -1,176 +1,121 @@
-# 🤖 ML Prediction Service
+# 🚀 ML Prediction Service
 
-**Status:** 📋 Planungsphase  
-**Version:** 1.0  
-**Datum:** 24. Dezember 2025
-
----
+Machine Learning Prediction Service für Coin-Bot - Echtzeit-Vorhersagen mit trainierten Modellen.
 
 ## 📋 Übersicht
 
-Der **ML Prediction Service** ist ein Echtzeit-Vorhersage-Service, der automatisch Vorhersagen macht, sobald neue Daten in die `coin_metrics` Tabelle eingetragen werden.
+Dieser Service:
+- ✅ Lädt Modelle vom Training Service
+- ✅ Überwacht `coin_metrics` für neue Einträge (LISTEN/NOTIFY oder Polling)
+- ✅ Macht automatisch Vorhersagen mit allen aktiven Modellen
+- ✅ Sendet Vorhersagen an n8n (optional)
+- ✅ Bietet REST API für manuelle Vorhersagen und Modell-Verwaltung
 
-### Hauptfunktion
+## 🐳 Quick Start mit Docker
 
-**Echtzeit-Vorhersagen für alle Coins mit allen aktiven Modellen.**
+### Voraussetzungen
+- Docker & Docker Compose
+- Externe PostgreSQL-Datenbank (geteilt mit Training Service)
+- Training Service API erreichbar (für Modell-Download)
 
----
+### Lokales Testing
 
-## 🎯 Was macht der Service?
+```bash
+cd ml-prediction-service
 
-1. ✅ **Überwacht `coin_metrics`** auf neue Einträge
-2. ✅ **Lädt aktive Modelle** aus `ml_models` Tabelle
-3. ✅ **Sammelt Historie** für jeden Coin (für Feature-Engineering)
-4. ✅ **Bereitet Features auf** (gleiche Logik wie Training Service)
-5. ✅ **Macht Vorhersagen** mit allen aktiven Modellen
-6. ✅ **Speichert Ergebnisse** in `predictions` Tabelle
-7. ✅ **Sendet Alerts** bei hoher Wahrscheinlichkeit (optional)
+# Container bauen und starten
+docker-compose up -d
 
----
+# Logs ansehen
+docker-compose logs -f
+
+# Health Check testen
+curl http://localhost:8006/api/health
+
+# Container stoppen
+docker-compose down
+```
+
+### Environment Variables
+
+Wichtigste Variablen (siehe `.env.example`):
+- `DB_DSN` - Externe Datenbank-Verbindung
+- `TRAINING_SERVICE_API_URL` - URL zum Training Service
+- `MODEL_STORAGE_PATH` - Pfad für Modell-Dateien
+- `N8N_WEBHOOK_URL` - n8n Webhook (optional)
+
+## 🎨 Web UI
+
+Die Streamlit UI ist verfügbar unter:
+- **Streamlit UI:** http://localhost:8502
+- **FastAPI API:** http://localhost:8006
+
+**Funktionen:**
+- 🏠 Übersicht: Alle aktiven Modelle anzeigen und verwalten
+- 📥 Modell importieren: Modelle vom Training Service importieren
+- 🔮 Vorhersage: Manuelle Vorhersagen für Coins
+- 📋 Vorhersagen: Liste aller Vorhersagen mit Filtern
+- 📊 Statistiken: Service-Statistiken und Health Status
+- 📜 Logs: Live-Logs vom Container anzeigen
+
+## 📡 API Endpoints
+
+### Models
+- `GET /api/models/available` - Verfügbare Modelle (für Import)
+- `POST /api/models/import` - Modell importieren
+- `GET /api/models/active` - Aktive Modelle
+- `POST /api/models/{id}/activate` - Modell aktivieren
+- `POST /api/models/{id}/deactivate` - Modell deaktivieren
+- `PATCH /api/models/{id}/rename` - Modell umbenennen
+- `DELETE /api/models/{id}` - Modell löschen
+
+### Predictions
+- `POST /api/predict` - Manuelle Vorhersage
+- `GET /api/predictions` - Liste von Vorhersagen
+- `GET /api/predictions/latest/{coin_id}` - Neueste Vorhersage
+
+### System
+- `GET /api/health` - Health Check
+- `GET /api/metrics` - Prometheus Metrics
+- `GET /api/stats` - Statistiken
+
+## 🔧 Konfiguration
+
+Alle Konfiguration über Environment Variables (siehe `app/utils/config.py`).
 
 ## 📚 Dokumentation
 
-### ⭐ Start hier: [PROJEKT_PLAN.md](PROJEKT_PLAN.md)
+- `ML_PREDICTION_SERVICE_AUFBAU_ANLEITUNG.md` - Vollständige Aufbau-Anleitung
+- `API_BEISPIELE.md` - Praktische API-Beispiele mit curl und Python
+- `sql/SCHEMA_DOKUMENTATION.md` - Datenbank-Schema Dokumentation
+- API-Dokumentation: `http://localhost:8006/docs` (Swagger UI)
+- Tests: `tests/test_e2e.py` - End-to-End Test-Suite
 
-Der Projektplan enthält:
-- ✅ Vollständige Architektur
-- ✅ Alle Funktionen im Detail
-- ✅ API-Endpunkte
-- ✅ Datenbank-Schema
-- ✅ Workflow-Beispiele
-- ✅ Konfiguration
-- ✅ Deployment-Strategie
-- ✅ Erweiterungen
+## 🚀 Deployment
 
----
+### Coolify
 
-## 🏗️ Architektur (Kurz)
+1. Repository in Coolify verbinden
+2. Docker Compose Deployment wählen
+3. `docker-compose.coolify.yml` verwenden
+4. Environment Variables setzen
+5. Deploy!
 
-```
-coin_metrics (Neuer Eintrag)
-    ↓
-Event Handler (erkennt neuen Eintrag)
-    ↓
-Model Manager (lädt aktive Modelle)
-    ↓
-Feature Processor (holt Historie, bereitet Features auf)
-    ↓
-Prediction Engine (macht Vorhersagen)
-    ↓
-Database (speichert in predictions Tabelle)
-    ↓
-Optional: Alert/Webhook (bei hoher Wahrscheinlichkeit)
-```
+Siehe `ML_PREDICTION_SERVICE_AUFBAU_ANLEITUNG.md` für Details.
 
----
+## ⚠️ Wichtige Hinweise
 
-## 🔌 API (Geplant)
+- **Externe Datenbank:** DB läuft nicht im Container!
+- **Modell-Dateien:** Müssen verfügbar sein (Volume oder Shared Storage)
+- **Training Service:** Muss erreichbar sein für Modell-Download
+- **LISTEN/NOTIFY:** Für Echtzeit (< 100ms), Fallback: Polling (30s)
 
-### Modell-Verwaltung
-- `GET /api/models/active` - Liste aktiver Modelle
-- `POST /api/models/{id}/activate` - Modell aktivieren
-- `POST /api/models/{id}/deactivate` - Modell deaktivieren
-- `POST /api/models/{id}/reload` - Modell neu laden
+## 📊 Status
 
-### Vorhersagen
-- `POST /api/predict` - Manuelle Vorhersage
-- `GET /api/predictions` - Liste aller Vorhersagen
-- `GET /api/predictions/latest/{coin_id}` - Neueste Vorhersage
-
-### Status
-- `GET /api/health` - Health Check
-- `GET /api/metrics` - Prometheus Metriken
-- `GET /api/stats` - Statistiken
-
----
-
-## 🗄️ Datenbank
-
-### Neue Tabellen
-
-#### `predictions`
-Speichert alle Vorhersagen.
-
-**Felder:**
-- `id`, `coin_id`, `timestamp`
-- `model_id` (Foreign Key zu ml_models)
-- `prediction` (0 oder 1)
-- `probability` (0.0 - 1.0)
-- `features` (JSONB, optional)
-
-#### `prediction_alerts` (Optional)
-Speichert ausgelöste Alerts.
-
-### Erweiterungen
-
-#### `ml_models`
-- `is_active` (BOOLEAN) - Ist Modell aktiv?
-- `alert_threshold` (NUMERIC) - Threshold für Alerts
-
----
-
-## ⚙️ Technologie-Stack
-
-- **Backend:** FastAPI (Python 3.11)
-- **Datenbank:** PostgreSQL (asyncpg)
-- **ML-Frameworks:** Scikit-learn, XGBoost
-- **Monitoring:** Prometheus Metriken
-- **Deployment:** Docker, Coolify
-
----
-
-## 📊 Features
-
-### Kern-Funktionen
-- ✅ Echtzeit-Vorhersagen
-- ✅ Multi-Modell-Support
-- ✅ Feature-Engineering (gleiche Logik wie Training)
-- ✅ Modell-Caching
-- ✅ Batch-Verarbeitung
-- ✅ Alert-System
-
-### Geplant (Später)
-- 🔄 Ensemble-Vorhersagen
-- 🔄 Real-time WebSocket
-- 🔄 Modell-Auto-Selection
-- 🔄 Advanced Alerts
-
----
-
-## 🚀 Nächste Schritte
-
-1. ✅ **Planungsphase abgeschlossen**
-2. ⏳ **Implementierung starten** (nach Genehmigung des Plans)
-3. ⏳ **Testing**
-4. ⏳ **Deployment**
-
----
-
-## 📝 Wichtige Hinweise
-
-### Code-Wiederverwendung
-- Feature-Engineering: Gleiche Logik wie Training Service
-- Modell-Laden: Ähnliche Logik wie Testing
-- **Empfehlung:** Import aus Training Service für Start
-
-### Performance
-- Modell-Caching für schnelle Vorhersagen
-- Batch-Verarbeitung für Effizienz
-- Parallel-Verarbeitung für Skalierung
-
-### Integration
-- **ML Training Service:** Lädt Modelle aus `ml_models`
-- **Pump Metrics Service:** Reagiert auf neue `coin_metrics`
-- **n8n:** Vollständig API-kompatibel
-
----
-
-## 📖 Vollständiger Plan
-
-Siehe **[PROJEKT_PLAN.md](PROJEKT_PLAN.md)** für alle Details.
-
----
-
-**Status:** 📋 Planungsphase  
-**Nächster Schritt:** Plan durchgehen und genehmigen
-
+- ✅ Phase 1: Grundlagen & Datenbank
+- ✅ Phase 2: Core-Komponenten
+- ✅ Phase 3: Prediction Engine
+- ✅ Phase 4: REST API
+- ✅ Phase 5: Docker & Deployment
+- ✅ Phase 6: Testing & Optimierung
+- ✅ Phase 7: Streamlit UI

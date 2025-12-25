@@ -1,0 +1,36 @@
+services:
+  ml-prediction:
+    build: .
+    container_name: ml-prediction-service
+    ports:
+      - "8006:8000"  # FastAPI
+      - "8502:8501"  # Streamlit
+    environment:
+      # ⚠️ EXTERNE Datenbank (nicht im Docker-Compose!)
+      - DB_DSN=postgresql://postgres:Ycy0qfClGpXPbm3Vulz1jBL0OFfCojITnbST4JBYreS5RkBCTsYc2FkbgyUstE6g@100.76.209.59:5432/crypto
+      - API_PORT=8000
+      - MODEL_STORAGE_PATH=/app/models
+      - POLLING_INTERVAL_SECONDS=30
+      - BATCH_SIZE=50
+      - BATCH_TIMEOUT_SECONDS=5
+      - FEATURE_HISTORY_SIZE=20
+      - MAX_CONCURRENT_PREDICTIONS=10
+      - MODEL_CACHE_SIZE=10
+      - TRAINING_SERVICE_API_URL=http://100.76.209.59:8005/api
+      - N8N_WEBHOOK_URL=https://n8n-ai.chase295.de/webhook/get-coins
+      - N8N_WEBHOOK_TIMEOUT=5  # Timeout in Sekunden
+      - DEFAULT_ALERT_THRESHOLD=0.7  # Alert-Schwelle (0.0-1.0)
+      - LOG_LEVEL=DEBUG
+      - LOG_FORMAT=text
+    volumes:
+      - ./models:/app/models  # Lokale Models (oder: /shared/models:/app/models)
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker Socket für Logs-API
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    # Keine network-Konfiguration nötig - DB ist extern!
+
