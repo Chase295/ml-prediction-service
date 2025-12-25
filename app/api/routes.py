@@ -88,23 +88,65 @@ async def import_model_endpoint(request: ModelImportRequest):
     Importiert Modell vom Training Service.
     
     Lädt Modell-Datei herunter und speichert in prediction_active_models.
+    
+    ⚠️ WICHTIG: Prüft doppelt ob Modell bereits importiert ist (auch wenn gelöscht).
     """
     try:
-        # 1. Lade Modell-Datei vom Training Service
+        logger.info(f"📥 Import-Anfrage für Modell ID: {request.model_id}")
+        
+        # 1. Prüfe ob Modell bereits importiert (VOR Download - spart Zeit)
+        from app.database.models import get_active_models
+        existing_models = await get_active_models(include_inactive=True)
+        existing = next((m for m in existing_models if m['model_id'] == request.model_id), None)
+        
+        if existing:
+            existing_id = existing['id']
+            is_active = existing.get('is_active', False)
+            status = "aktiv" if is_active else "pausiert"
+            logger.warning(f"⚠️ Modell {request.model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status})")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Modell {request.model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status}). Lösche es zuerst, um es erneut zu importieren."
+            )
+        
+        # 2. Lade Modell-Datei vom Training Service
+        logger.info(f"📥 Lade Modell {request.model_id} vom Training Service...")
         local_model_path = await download_model_file(request.model_id)
+        logger.info(f"✅ Modell-Datei heruntergeladen: {local_model_path}")
         
-        # 2. Importiere Modell in prediction_active_models
-        active_model_id = await import_model(
-            model_id=request.model_id,
-            local_model_path=local_model_path,
-            model_file_url=request.model_file_url
-        )
+        # 3. Importiere Modell in prediction_active_models (prüft nochmal intern)
+        logger.info(f"💾 Speichere Modell {request.model_id} in Datenbank...")
+        try:
+            active_model_id = await import_model(
+                model_id=request.model_id,
+                local_model_path=local_model_path,
+                model_file_url=request.model_file_url
+            )
+            logger.info(f"✅ Modell {request.model_id} erfolgreich importiert (active_model_id: {active_model_id})")
+        except ValueError as e:
+            # Modell bereits importiert - das sollte nicht passieren, da wir oben prüfen
+            logger.error(f"❌ Modell {request.model_id} ist bereits importiert (zweite Prüfung): {e}")
+            # Lösche heruntergeladene Datei wieder
+            try:
+                import os
+                if os.path.exists(local_model_path):
+                    os.remove(local_model_path)
+                    logger.info(f"🗑️ Heruntergeladene Datei gelöscht: {local_model_path}")
+            except:
+                pass
+            raise HTTPException(status_code=400, detail=str(e))
         
-        # 3. Hole Modell-Informationen
+        # 4. Hole Modell-Informationen
         active_models = await get_active_models()
         imported_model = next((m for m in active_models if m['id'] == active_model_id), None)
         
         if not imported_model:
+            # Versuche auch inaktive Modelle
+            active_models_all = await get_active_models(include_inactive=True)
+            imported_model = next((m for m in active_models_all if m['id'] == active_model_id), None)
+        
+        if not imported_model:
+            logger.error(f"❌ Importiertes Modell {active_model_id} nicht gefunden nach Import")
             raise HTTPException(status_code=404, detail="Importiertes Modell nicht gefunden")
         
         return ImportModelResponse(
@@ -114,6 +156,8 @@ async def import_model_endpoint(request: ModelImportRequest):
             local_model_path=local_model_path,
             message=f"Modell {request.model_id} erfolgreich importiert"
         )
+    except HTTPException:
+        raise
     except ValueError as e:
         logger.warning(f"⚠️ Validierungsfehler beim Import: {e}")
         raise HTTPException(status_code=400, detail=str(e))
