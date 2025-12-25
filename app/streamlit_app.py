@@ -633,29 +633,35 @@ def page_import():
         # Import-Button
         # WICHTIG: Verhindere mehrfaches Klicken mit session_state
         button_key = f"import_button_{selected_model_id}"
-        if button_key not in st.session_state:
-            st.session_state[button_key] = False
+        importing_key = f"importing_{selected_model_id}"
         
-        if st.button("📥 Modell importieren", type="primary", use_container_width=True, disabled=st.session_state[button_key]):
-            # Verhindere mehrfaches Klicken
-            st.session_state[button_key] = True
+        # Prüfe ob bereits importiert wird
+        is_importing = st.session_state.get(importing_key, False)
+        
+        if st.button("📥 Modell importieren", type="primary", use_container_width=True, disabled=is_importing):
+            # Setze Import-Flag SOFORT (verhindert mehrfaches Klicken)
+            st.session_state[importing_key] = True
             
             with st.spinner("⏳ Importiere Modell..."):
                 st.info(f"🔍 Importiere Modell ID: {selected_model_id}...")
+                
+                # API-Call
                 result = api_post("/models/import", {"model_id": selected_model_id})
+                
                 if result:
                     st.success(f"✅ Modell erfolgreich importiert! (Active Model ID: {result.get('active_model_id')})")
                     st.balloons()
                     # Warte kurz, damit DB-Update durch ist
                     import time
-                    time.sleep(0.5)
-                    # Reset button state
-                    st.session_state[button_key] = False
-                    st.rerun()
+                    time.sleep(1.0)  # Längere Wartezeit für DB-Sync
                 else:
                     st.error("❌ Fehler beim Importieren des Modells")
-                    # Reset button state bei Fehler
-                    st.session_state[button_key] = False
+                
+                # Reset Import-Flag
+                st.session_state[importing_key] = False
+                
+                # Rerun NACH Reset (verhindert mehrfaches Ausführen)
+                st.rerun()
 
 def page_predict():
     """Manuelle Vorhersage"""

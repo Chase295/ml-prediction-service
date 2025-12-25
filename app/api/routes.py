@@ -92,21 +92,22 @@ async def import_model_endpoint(request: ModelImportRequest):
     ⚠️ WICHTIG: Prüft doppelt ob Modell bereits importiert ist (auch wenn gelöscht).
     """
     try:
-        logger.info(f"📥 Import-Anfrage für Modell ID: {request.model_id}")
+        import asyncio
+        from datetime import datetime
+        
+        logger.info(f"📥 Import-Anfrage für Modell ID: {request.model_id} um {datetime.now().isoformat()}")
         logger.info(f"🔍 Prüfe ob Modell {request.model_id} bereits importiert ist...")
         
         # 1. Prüfe ob Modell bereits importiert (VOR Download - spart Zeit)
-        from app.database.models import get_active_models
-        existing_models = await get_active_models(include_inactive=True)
-        logger.info(f"🔍 Gefundene aktive Modelle: {len(existing_models)}")
-        for em in existing_models:
-            logger.debug(f"  - active_model_id: {em['id']}, model_id: {em['model_id']}, is_active: {em.get('is_active', False)}")
+        # Verwende direkte DB-Abfrage für atomare Prüfung
+        pool = await get_pool()
+        existing_db = await pool.fetchrow("""
+            SELECT id, is_active FROM prediction_active_models WHERE model_id = $1
+        """, request.model_id)
         
-        existing = next((m for m in existing_models if m['model_id'] == request.model_id), None)
-        
-        if existing:
-            existing_id = existing['id']
-            is_active = existing.get('is_active', False)
+        if existing_db:
+            existing_id = existing_db['id']
+            is_active = existing_db.get('is_active', False)
             status = "aktiv" if is_active else "pausiert"
             logger.warning(f"⚠️ Modell {request.model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status})")
             raise HTTPException(
