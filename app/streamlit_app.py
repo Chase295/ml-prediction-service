@@ -632,36 +632,45 @@ def page_import():
         
         # Import-Button
         # WICHTIG: Verhindere mehrfaches Klicken mit session_state
-        button_key = f"import_button_{selected_model_id}"
         importing_key = f"importing_{selected_model_id}"
+        import_complete_key = f"import_complete_{selected_model_id}"
         
-        # Prüfe ob bereits importiert wird
+        # Prüfe ob bereits importiert wird ODER bereits importiert wurde (verhindert mehrfaches Ausführen nach rerun)
         is_importing = st.session_state.get(importing_key, False)
+        is_complete = st.session_state.get(import_complete_key, False)
         
-        if st.button("📥 Modell importieren", type="primary", use_container_width=True, disabled=is_importing):
+        # Zeige Erfolgs-Meldung wenn Import abgeschlossen
+        if is_complete:
+            st.success("✅ Modell wurde bereits importiert!")
+            if st.button("🔄 Seite aktualisieren", key="refresh_after_import"):
+                # Lösche alle Import-Flags
+                st.session_state.pop(importing_key, None)
+                st.session_state.pop(import_complete_key, None)
+                st.rerun()
+        
+        if st.button("📥 Modell importieren", type="primary", use_container_width=True, disabled=(is_importing or is_complete)):
             # Setze Import-Flag SOFORT (verhindert mehrfaches Klicken)
             st.session_state[importing_key] = True
+            st.session_state[import_complete_key] = False
             
-            with st.spinner("⏳ Importiere Modell..."):
-                st.info(f"🔍 Importiere Modell ID: {selected_model_id}...")
-                
-                # API-Call
-                result = api_post("/models/import", {"model_id": selected_model_id})
-                
-                if result:
-                    st.success(f"✅ Modell erfolgreich importiert! (Active Model ID: {result.get('active_model_id')})")
-                    st.balloons()
-                    # Warte kurz, damit DB-Update durch ist
-                    import time
-                    time.sleep(1.0)  # Längere Wartezeit für DB-Sync
-                else:
-                    st.error("❌ Fehler beim Importieren des Modells")
-                
-                # Reset Import-Flag
+            # API-Call (OHNE st.spinner, da das rerun() verursachen kann)
+            st.info(f"🔍 Importiere Modell ID: {selected_model_id}...")
+            result = api_post("/models/import", {"model_id": selected_model_id})
+            
+            if result:
+                st.success(f"✅ Modell erfolgreich importiert! (Active Model ID: {result.get('active_model_id')})")
+                st.balloons()
+                # Setze Complete-Flag
+                st.session_state[import_complete_key] = True
+                # Warte kurz, damit DB-Update durch ist
+                import time
+                time.sleep(1.5)  # Längere Wartezeit für DB-Sync
+            else:
+                st.error("❌ Fehler beim Importieren des Modells")
+                # Reset bei Fehler
                 st.session_state[importing_key] = False
-                
-                # Rerun NACH Reset (verhindert mehrfaches Ausführen)
-                st.rerun()
+            
+            # KEIN st.rerun() hier - lass den Benutzer manuell aktualisieren
 
 def page_predict():
     """Manuelle Vorhersage"""
