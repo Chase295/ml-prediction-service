@@ -103,6 +103,35 @@ async def startup():
         init_health_status()
         logger.info("✅ Health Status initialisiert")
         
+        # Prüfe fehlende Modell-Dateien
+        try:
+            from app.database.models import get_active_models
+            from app.prediction.model_manager import download_model_file
+            import os
+            
+            active_models = await get_active_models()
+            missing_models = []
+            
+            for model in active_models:
+                local_path = model.get('local_model_path')
+                if local_path and not os.path.exists(local_path):
+                    missing_models.append({
+                        'active_model_id': model['id'],
+                        'model_id': model['model_id'],
+                        'name': model.get('name', 'Unknown'),
+                        'path': local_path
+                    })
+            
+            if missing_models:
+                logger.warning(f"⚠️ {len(missing_models)} Modell-Dateien fehlen!")
+                for m in missing_models:
+                    logger.warning(f"  - Modell {m['model_id']} ({m['name']}): {m['path']}")
+                logger.warning("💡 Tipp: Importiere die Modelle über die UI oder API (siehe MODELL_IMPORT_ANLEITUNG.md)")
+            else:
+                logger.info(f"✅ Alle {len(active_models)} aktiven Modell-Dateien vorhanden")
+        except Exception as e:
+            logger.warning(f"⚠️ Fehler beim Prüfen der Modell-Dateien: {e}")
+        
         # Starte Event-Handler (LISTEN/NOTIFY oder Polling)
         from app.prediction.event_handler import EventHandler
         event_handler = EventHandler()
