@@ -21,7 +21,9 @@ import plotly.graph_objects as go
 # Konfiguration
 # ============================================================
 
-API_BASE_URL = "http://localhost:8000/api"
+# API Base URL - lokal oder remote
+import os
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api")
 
 # Page Config
 st.set_page_config(
