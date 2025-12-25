@@ -302,11 +302,14 @@ async def import_model(
     
     # 1. Prüfe ob Modell bereits importiert
     existing = await pool.fetchrow("""
-        SELECT id FROM prediction_active_models WHERE model_id = $1
+        SELECT id, is_active FROM prediction_active_models WHERE model_id = $1
     """, model_id)
     
     if existing:
-        raise ValueError(f"Modell {model_id} ist bereits importiert (active_model_id: {existing['id']})")
+        existing_id = existing['id']
+        is_active = existing.get('is_active', False)
+        status = "aktiv" if is_active else "pausiert"
+        raise ValueError(f"Modell {model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status})")
     
     # 2. Hole Metadaten aus ml_models
     model_data = await get_model_from_training_service(model_id)
@@ -426,7 +429,7 @@ async def delete_active_model(active_model_id: int) -> bool:
     """
     Löscht Modell aus prediction_active_models.
     
-    ⚠️ WICHTIG: Lokale Datei muss separat gelöscht werden!
+    ⚠️ WICHTIG: Löscht auch die lokale Modell-Datei!
     
     Args:
         active_model_id: ID in prediction_active_models
@@ -435,11 +438,41 @@ async def delete_active_model(active_model_id: int) -> bool:
         True wenn erfolgreich, False wenn nicht gefunden
     """
     pool = await get_pool()
+    
+    # 1. Hole Modell-Informationen (für Datei-Löschung)
+    row = await pool.fetchrow("""
+        SELECT model_id, local_model_path 
+        FROM prediction_active_models 
+        WHERE id = $1
+    """, active_model_id)
+    
+    if not row:
+        return False
+    
+    # 2. Lösche aus Datenbank
     result = await pool.execute("""
         DELETE FROM prediction_active_models WHERE id = $1
     """, active_model_id)
     
-    return result == "DELETE 1"
+    if result != "DELETE 1":
+        return False
+    
+    # 3. Lösche lokale Modell-Datei (falls vorhanden)
+    local_model_path = row.get('local_model_path')
+    if local_model_path:
+        import os
+        try:
+            if os.path.exists(local_model_path):
+                os.remove(local_model_path)
+                from app.utils.logging_config import get_logger
+                logger = get_logger(__name__)
+                logger.info(f"🗑️ Modell-Datei gelöscht: {local_model_path}")
+        except Exception as e:
+            from app.utils.logging_config import get_logger
+            logger = get_logger(__name__)
+            logger.warning(f"⚠️ Konnte Modell-Datei nicht löschen: {local_model_path} - {e}")
+    
+    return True
 
 async def update_alert_threshold(active_model_id: int, alert_threshold: float) -> bool:
     """

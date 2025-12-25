@@ -289,28 +289,45 @@ async def get_model_statistics_endpoint(active_model_id: int):
 async def delete_model_endpoint(active_model_id: int):
     """Löscht Modell (aus prediction_active_models + lokale Datei)"""
     try:
-        # Hole Modell-Informationen für lokale Datei
-        active_models = await get_active_models()
+        logger.info(f"🗑️ Lösche Modell (active_model_id: {active_model_id})...")
+        
+        # Hole Modell-Informationen für lokale Datei (auch inaktive Modelle prüfen)
+        from app.database.models import get_active_models
+        active_models = await get_active_models(include_inactive=True)
         model_to_delete = next((m for m in active_models if m['id'] == active_model_id), None)
         
         if not model_to_delete:
+            logger.warning(f"⚠️ Modell {active_model_id} nicht gefunden")
             raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
         
+        model_id = model_to_delete.get('model_id')
+        model_name = model_to_delete.get('name', 'Unknown')
+        logger.info(f"🗑️ Lösche Modell: {model_name} (model_id: {model_id}, active_model_id: {active_model_id})")
+        
         # Lösche lokale Datei
-        local_path = model_to_delete['local_model_path']
-        if os.path.exists(local_path):
+        local_path = model_to_delete.get('local_model_path')
+        if local_path and os.path.exists(local_path):
             try:
                 os.remove(local_path)
                 logger.info(f"✅ Lokale Modell-Datei gelöscht: {local_path}")
             except Exception as e:
                 logger.warning(f"⚠️ Fehler beim Löschen der lokalen Datei: {e}")
+        elif local_path:
+            logger.debug(f"ℹ️ Modell-Datei existiert nicht: {local_path}")
         
         # Lösche aus DB
         success = await delete_active_model(active_model_id)
         if not success:
-            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
+            logger.error(f"❌ Fehler beim Löschen aus Datenbank: active_model_id {active_model_id}")
+            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} konnte nicht aus Datenbank gelöscht werden")
         
-        return {"message": f"Modell {active_model_id} gelöscht", "active_model_id": active_model_id}
+        logger.info(f"✅ Modell {active_model_id} erfolgreich gelöscht (model_id: {model_id})")
+        return {
+            "message": f"Modell {active_model_id} gelöscht", 
+            "active_model_id": active_model_id,
+            "model_id": model_id,
+            "model_name": model_name
+        }
     except HTTPException:
         raise
     except Exception as e:
