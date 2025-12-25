@@ -524,37 +524,46 @@ def page_overview():
             
             with col4:
                 if st.button("🗑️ Löschen", key="btn_delete", use_container_width=True, type="secondary"):
-                    if api_delete(f"/models/{model_id}"):
-                        st.success("✅ Modell gelöscht")
-                        if model_id in st.session_state.get('selected_model_ids', []):
-                            st.session_state['selected_model_ids'].remove(model_id)
-                        st.rerun()
-                    else:
-                        st.error("❌ Fehler beim Löschen des Modells")
+                    with st.spinner("🗑️ Lösche Modell..."):
+                        if api_delete(f"/models/{model_id}"):
+                            st.success("✅ Modell gelöscht")
+                            # Lösche aus Selection
+                            if model_id in st.session_state.get('selected_model_ids', []):
+                                st.session_state['selected_model_ids'].remove(model_id)
+                            # Warte kurz, damit DB-Update durch ist
+                            import time
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error("❌ Fehler beim Löschen des Modells")
         
         elif selected_count >= 2:
             # Mehrere Modelle: Nur Löschen
             if st.button("🗑️ Alle ausgewählten löschen", key="btn_delete_all", use_container_width=True, type="secondary"):
-                deleted_count = 0
-                failed_count = 0
-                ids_to_delete = list(st.session_state.get('selected_model_ids', []))
-                for model_id in ids_to_delete:
-                    if api_delete(f"/models/{model_id}"):
-                        deleted_count += 1
-                        if model_id in st.session_state.get('selected_model_ids', []):
-                            st.session_state['selected_model_ids'].remove(model_id)
-                    else:
-                        failed_count += 1
-                
-                if deleted_count > 0 or failed_count > 0:
-                    if deleted_count > 0:
-                        if failed_count > 0:
-                            st.warning(f"⚠️ {deleted_count} Modell(e) gelöscht, {failed_count} Fehler")
+                with st.spinner("🗑️ Lösche Modelle..."):
+                    deleted_count = 0
+                    failed_count = 0
+                    ids_to_delete = list(st.session_state.get('selected_model_ids', []))
+                    for model_id in ids_to_delete:
+                        if api_delete(f"/models/{model_id}"):
+                            deleted_count += 1
+                            if model_id in st.session_state.get('selected_model_ids', []):
+                                st.session_state['selected_model_ids'].remove(model_id)
                         else:
-                            st.success(f"✅ {deleted_count} Modell(e) gelöscht")
-                    if failed_count > 0 and deleted_count == 0:
-                        st.error(f"❌ Fehler beim Löschen von {failed_count} Modell(en)")
-                    st.rerun()
+                            failed_count += 1
+                    
+                    if deleted_count > 0 or failed_count > 0:
+                        if deleted_count > 0:
+                            if failed_count > 0:
+                                st.warning(f"⚠️ {deleted_count} Modell(e) gelöscht, {failed_count} Fehler")
+                            else:
+                                st.success(f"✅ {deleted_count} Modell(e) gelöscht")
+                        if failed_count > 0 and deleted_count == 0:
+                            st.error(f"❌ Fehler beim Löschen von {failed_count} Modell(en)")
+                        # Warte kurz, damit DB-Updates durch sind
+                        import time
+                        time.sleep(0.5)
+                        st.rerun()
     else:
         st.info("💡 Wähle ein oder mehrere Modelle aus, um Aktionen auszuführen")
 
@@ -626,7 +635,12 @@ def page_import():
                 if result:
                     st.success(f"✅ Modell erfolgreich importiert! (Active Model ID: {result.get('active_model_id')})")
                     st.balloons()
+                    # Warte kurz, damit DB-Update durch ist
+                    import time
+                    time.sleep(0.5)
                     st.rerun()
+                else:
+                    st.error("❌ Fehler beim Importieren des Modells")
 
 def page_predict():
     """Manuelle Vorhersage"""
