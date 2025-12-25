@@ -93,10 +93,15 @@ async def import_model_endpoint(request: ModelImportRequest):
     """
     try:
         logger.info(f"📥 Import-Anfrage für Modell ID: {request.model_id}")
+        logger.info(f"🔍 Prüfe ob Modell {request.model_id} bereits importiert ist...")
         
         # 1. Prüfe ob Modell bereits importiert (VOR Download - spart Zeit)
         from app.database.models import get_active_models
         existing_models = await get_active_models(include_inactive=True)
+        logger.info(f"🔍 Gefundene aktive Modelle: {len(existing_models)}")
+        for em in existing_models:
+            logger.debug(f"  - active_model_id: {em['id']}, model_id: {em['model_id']}, is_active: {em.get('is_active', False)}")
+        
         existing = next((m for m in existing_models if m['model_id'] == request.model_id), None)
         
         if existing:
@@ -108,6 +113,8 @@ async def import_model_endpoint(request: ModelImportRequest):
                 status_code=400, 
                 detail=f"Modell {request.model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status}). Lösche es zuerst, um es erneut zu importieren."
             )
+        
+        logger.info(f"✅ Modell {request.model_id} ist noch nicht importiert - fahre fort...")
         
         # 2. Lade Modell-Datei vom Training Service
         logger.info(f"📥 Lade Modell {request.model_id} vom Training Service...")

@@ -629,8 +629,17 @@ def page_import():
                 st.metric("ROC-AUC", f"{roc_auc:.4f}", help="Area Under ROC Curve")
         
         # Import-Button
-        if st.button("📥 Modell importieren", type="primary", use_container_width=True):
+        # WICHTIG: Verhindere mehrfaches Klicken mit session_state
+        button_key = f"import_button_{selected_model_id}"
+        if button_key not in st.session_state:
+            st.session_state[button_key] = False
+        
+        if st.button("📥 Modell importieren", type="primary", use_container_width=True, disabled=st.session_state[button_key]):
+            # Verhindere mehrfaches Klicken
+            st.session_state[button_key] = True
+            
             with st.spinner("⏳ Importiere Modell..."):
+                st.info(f"🔍 Importiere Modell ID: {selected_model_id}...")
                 result = api_post("/models/import", {"model_id": selected_model_id})
                 if result:
                     st.success(f"✅ Modell erfolgreich importiert! (Active Model ID: {result.get('active_model_id')})")
@@ -638,9 +647,13 @@ def page_import():
                     # Warte kurz, damit DB-Update durch ist
                     import time
                     time.sleep(0.5)
+                    # Reset button state
+                    st.session_state[button_key] = False
                     st.rerun()
                 else:
                     st.error("❌ Fehler beim Importieren des Modells")
+                    # Reset button state bei Fehler
+                    st.session_state[button_key] = False
 
 def page_predict():
     """Manuelle Vorhersage"""
