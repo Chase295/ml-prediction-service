@@ -6,6 +6,7 @@ services:
     container_name: ml-prediction-service
     ports:
       - "${PORT:-8000}:8000"  # FastAPI (Port aus Environment Variable)
+      - "${STREAMLIT_PORT:-8501}:8501"  # Streamlit (Port aus Environment Variable)
     environment:
       # ⚠️ EXTERNE Datenbank (nicht im Docker-Compose!)
       - DB_DSN=${DB_DSN}
