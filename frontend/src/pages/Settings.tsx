@@ -21,6 +21,7 @@ const Settings: React.FC = () => {
   const { toggleTheme, isDarkMode } = React.useContext(ThemeContext);
   const [apiUrl, setApiUrl] = React.useState('http://localhost:8000/api');
   const [trainingServiceUrl, setTrainingServiceUrl] = React.useState('http://ml-training-service:8000/api');
+  const [dbDsn, setDbDsn] = React.useState('postgresql://user:pass@localhost:5432/crypto');
   const [saved, setSaved] = React.useState(false);
 
   // Service neu starten
@@ -38,6 +39,7 @@ const Settings: React.FC = () => {
     // Hier könnten die Einstellungen gespeichert werden
     localStorage.setItem('apiUrl', apiUrl);
     localStorage.setItem('trainingServiceUrl', trainingServiceUrl);
+    localStorage.setItem('dbDsn', dbDsn);
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   };
@@ -45,8 +47,10 @@ const Settings: React.FC = () => {
   const handleReset = () => {
     setApiUrl('http://localhost:8000/api');
     setTrainingServiceUrl('http://ml-training-service:8000/api');
+    setDbDsn('postgresql://user:pass@localhost:5432/crypto');
     localStorage.removeItem('apiUrl');
     localStorage.removeItem('trainingServiceUrl');
+    localStorage.removeItem('dbDsn');
   };
 
   const handleRestart = () => {
@@ -57,9 +61,11 @@ const Settings: React.FC = () => {
     // Lade gespeicherte Einstellungen
     const savedApiUrl = localStorage.getItem('apiUrl');
     const savedTrainingServiceUrl = localStorage.getItem('trainingServiceUrl');
+    const savedDbDsn = localStorage.getItem('dbDsn');
 
     if (savedApiUrl) setApiUrl(savedApiUrl);
     if (savedTrainingServiceUrl) setTrainingServiceUrl(savedTrainingServiceUrl);
+    if (savedDbDsn) setDbDsn(savedDbDsn);
   }, []);
 
   return (
@@ -123,6 +129,26 @@ const Settings: React.FC = () => {
         </Paper>
       </Box>
 
+      {/* Datenbank Einstellungen */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Datenbank-Konfiguration
+        </Typography>
+        <Box sx={{ mt: 2 }}>
+          <TextField
+            fullWidth
+            label="Datenbank-Verbindungsstring"
+            value={dbDsn}
+            onChange={(e) => setDbDsn(e.target.value)}
+            variant="outlined"
+            sx={{ mb: 2 }}
+            helperText="PostgreSQL DSN (nur für Entwicklung/Tests)"
+          />
+          <Alert severity="warning" sx={{ mb: 0 }}>
+            <strong>⚠️ Sicherheitshinweis:</strong> Datenbank-Verbindungsdaten sollten normalerweise nicht über die Web-UI geändert werden. Verwenden Sie Environment-Variablen in der Produktion.
+          </Alert>
+        </Box>
+      </Paper>
 
       {/* Speichern-Buttons */}
       <Paper sx={{ p: 3 }}>
