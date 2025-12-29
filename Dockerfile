@@ -47,6 +47,18 @@ stdout_logfile=/app/logs/fastapi.log\n\
 stdout_logfile_maxbytes=50MB\n\
 stdout_logfile_backups=5\n\
 \n\
+[program:event-handler]\n\
+command=python -m app.prediction.event_handler\n\
+directory=/app\n\
+autostart=true\n\
+autorestart=true\n\
+stderr_logfile=/app/logs/event_handler.log\n\
+stderr_logfile_maxbytes=50MB\n\
+stderr_logfile_backups=5\n\
+stdout_logfile=/app/logs/event_handler.log\n\
+stdout_logfile_maxbytes=50MB\n\
+stdout_logfile_backups=5\n\
+\n\
 [program:streamlit]\n\
 command=streamlit run app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --server.headless=true\n\
 directory=/app\n\

@@ -5,6 +5,10 @@ Liest alle Environment Variables und stellt Default-Werte bereit.
 Wichtig für Docker-Deployment mit externer Datenbank.
 """
 import os
+from dotenv import load_dotenv
+
+# Lade .env-Datei
+load_dotenv()
 
 # ============================================================
 # Datenbank (EXTERNE DB!)
@@ -20,12 +24,12 @@ STREAMLIT_PORT = int(os.getenv("STREAMLIT_PORT", "8501"))
 # ============================================================
 # Modell-Storage (lokal im Container)
 # ============================================================
-MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "/app/models")
+MODEL_STORAGE_PATH = os.getenv("MODEL_STORAGE_PATH", "/tmp/models")
 
 # ============================================================
 # Training Service API (für Modell-Download)
 # ============================================================
-TRAINING_SERVICE_API_URL = os.getenv("TRAINING_SERVICE_API_URL", "http://localhost:8000/api")
+TRAINING_SERVICE_API_URL = os.getenv("TRAINING_SERVICE_API_URL", "http://ml-training-service:8000/api")
 
 # ============================================================
 # Event-Handling

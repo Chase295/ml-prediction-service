@@ -1,0 +1,207 @@
+/**
+ * ConfigurationTab Component
+ * Modell-Konfiguration - leitet zur AlertConfig-Seite weiter
+ */
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Typography,
+  Box,
+  Card,
+  CardContent,
+  Button,
+  Chip
+} from '@mui/material';
+import {
+  Settings as SettingsIcon,
+  Edit as EditIcon,
+  Notifications as NotificationsIcon,
+  Timer as TimerIcon
+} from '@mui/icons-material';
+import type { Model } from '../../types/model';
+
+interface ConfigurationTabProps {
+  model: Model;
+}
+
+const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ model }) => {
+  const navigate = useNavigate();
+
+  const handleConfigureAlerts = () => {
+    navigate(`/model/${model.id}/alert-config`);
+  };
+
+  return (
+    <Box>
+      <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
+        ⚙️ Modell-Konfiguration
+      </Typography>
+
+      <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+        Verwalten Sie alle Konfigurationseinstellungen für dieses Modell
+      </Typography>
+
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {/* Alert-Konfiguration */}
+        <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                <NotificationsIcon sx={{ mr: 1, color: 'primary.main' }} />
+                <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                  Alert-Konfiguration
+                </Typography>
+              </Box>
+
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Konfigurieren Sie N8N-Webhooks, Alert-Schwellen und Coin-Filter
+              </Typography>
+
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 3 }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="body2">N8N Status:</Typography>
+                  <Chip
+                    size="small"
+                    label={model.n8n_enabled ? 'Aktiviert' : 'Deaktiviert'}
+                    color={model.n8n_enabled ? 'success' : 'default'}
+                  />
+                </Box>
+
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="body2">Alert-Schwelle:</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                    {(model.alert_threshold * 100).toFixed(1)}%
+                  </Typography>
+                </Box>
+
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="body2">Coin-Filter:</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                    {model.coin_filter_mode === 'all' ? 'Alle Coins' : 'Whitelist'}
+                  </Typography>
+                </Box>
+              </Box>
+
+              <Button
+                variant="contained"
+                startIcon={<EditIcon />}
+                onClick={handleConfigureAlerts}
+                fullWidth
+              >
+                Alert-Konfiguration bearbeiten
+              </Button>
+            </CardContent>
+          </Card>
+
+        {/* Ignore-Settings */}
+        <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                <TimerIcon sx={{ mr: 1, color: 'warning.main' }} />
+                <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                  Coin-Ignore-Einstellungen
+                </Typography>
+              </Box>
+
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Automatische Coin-Ignorierung nach Vorhersagen
+              </Typography>
+
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 3 }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="body2">Schlechte Vorhersagen:</Typography>
+                  <Chip
+                    size="small"
+                    label={`${model.ignore_bad_seconds}s`}
+                    color="error"
+                    variant="outlined"
+                  />
+                </Box>
+
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="body2">Positive Vorhersagen:</Typography>
+                  <Chip
+                    size="small"
+                    label={`${model.ignore_positive_seconds}s`}
+                    color="success"
+                    variant="outlined"
+                  />
+                </Box>
+
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="body2">Alert-Vorhersagen:</Typography>
+                  <Chip
+                    size="small"
+                    label={`${model.ignore_alert_seconds}s`}
+                    color="warning"
+                    variant="outlined"
+                  />
+                </Box>
+              </Box>
+
+              <Button
+                variant="outlined"
+                startIcon={<EditIcon />}
+                onClick={handleConfigureAlerts}
+                fullWidth
+              >
+                Ignore-Settings bearbeiten
+              </Button>
+            </CardContent>
+          </Card>
+
+        {/* Modell-Status */}
+          <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                <SettingsIcon sx={{ mr: 1, color: 'info.main' }} />
+                <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                  Modell-Status
+                </Typography>
+              </Box>
+
+              <Box
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: {
+                    xs: '1fr',
+                    sm: 'repeat(2, 1fr)',
+                    md: 'repeat(4, 1fr)'
+                  },
+                  gap: 2
+                }}
+              >
+                <Box sx={{ textAlign: 'center', p: 2, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="h6" sx={{ fontWeight: 700, color: model.is_active ? 'success.main' : 'error.main' }}>
+                    {model.is_active ? '🟢' : '🔴'}
+                  </Typography>
+                  <Typography variant="body2">Aktiv/Inaktiv</Typography>
+                </Box>
+
+                <Box sx={{ textAlign: 'center', p: 2, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                    {model.total_predictions || 0}
+                  </Typography>
+                  <Typography variant="body2">Vorhersagen</Typography>
+                </Box>
+
+                <Box sx={{ textAlign: 'center', p: 2, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                    {model.model_type}
+                  </Typography>
+                  <Typography variant="body2">Modell-Typ</Typography>
+                </Box>
+
+                <Box sx={{ textAlign: 'center', p: 2, border: 1, borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                    {model.target_direction?.toUpperCase()}
+                  </Typography>
+                  <Typography variant="body2">Ziel-Richtung</Typography>
+                </Box>
+              </Box>
+            </CardContent>
+          </Card>
+      </Box>
+  );
+};
+
+export default ConfigurationTab;

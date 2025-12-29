@@ -116,8 +116,16 @@ class ModelInfo(BaseModel):
     last_prediction_at: Optional[datetime]
     alert_threshold: float = Field(default=0.7, description="Alert-Threshold (0.0-1.0)")
     n8n_webhook_url: Optional[str] = Field(None, description="n8n Webhook URL (optional, überschreibt globale URL)")
-    n8n_send_mode: str = Field(default="all", description="Send-Mode: 'all' oder 'alerts_only'")
+    n8n_send_mode: str = Field(default="all", description="Send-Mode: 'all', 'alerts_only', 'positive_only', 'negative_only'")
     n8n_enabled: bool = Field(default=True, description="n8n aktiviert/deaktiviert")
+    coin_filter_mode: str = Field(default="all", description="Coin-Filter Modus: 'all' oder 'whitelist'")
+    coin_whitelist: Optional[List[str]] = Field(None, description="Liste der erlaubten Coin-Mint-Adressen")
+    coin_filter_mode: str = Field(default="all", description="Coin-Filter Modus: 'all' oder 'whitelist'")
+    coin_whitelist: Optional[List[str]] = Field(None, description="Liste der erlaubten Coin-Mint-Adressen")
+    # 🔄 NEU: Coin-Ignore-Einstellungen
+    ignore_bad_seconds: Optional[int] = Field(default=0, ge=0, le=86400, description="Sekunden für schlechte Vorhersagen (0-86400, 0=nie)")
+    ignore_positive_seconds: Optional[int] = Field(default=0, ge=0, le=86400, description="Sekunden für positive Vorhersagen")
+    ignore_alert_seconds: Optional[int] = Field(default=0, ge=0, le=86400, description="Sekunden für Alert-Vorhersagen")
     stats: Optional[Dict[str, int]] = Field(None, description="Statistiken (positive_predictions, negative_predictions, alerts_count)")
     created_at: datetime
 
@@ -209,5 +217,29 @@ class ImportModelResponse(BaseModel):
     model_name: str
     local_model_path: str
     message: str
+
+
+class UpdateAlertConfigRequest(BaseModel):
+    """Request für komplette Alert-Konfiguration Update"""
+    n8n_webhook_url: Optional[str] = Field(None, description="n8n Webhook URL")
+    n8n_enabled: bool = Field(default=True, description="n8n aktiviert/deaktiviert")
+    n8n_send_mode: str = Field(default="all", description="Send-Mode: 'all', 'alerts_only', 'positive_only', 'negative_only'")
+    alert_threshold: float = Field(default=0.7, description="Alert-Threshold (0.0-1.0)")
+    coin_filter_mode: str = Field(default="all", description="Coin-Filter Modus: 'all' oder 'whitelist'")
+    coin_whitelist: Optional[List[str]] = Field(None, description="Liste der erlaubten Coin-Mint-Adressen")
+
+
+class UpdateIgnoreSettingsRequest(BaseModel):
+    """Request für Coin-Ignore-Einstellungen Update"""
+    ignore_bad_seconds: int = Field(default=0, ge=0, le=86400, description="Sekunden für schlechte Vorhersagen (0-86400, 0=nie)")
+    ignore_positive_seconds: int = Field(default=0, ge=0, le=86400, description="Sekunden für positive Vorhersagen")
+    ignore_alert_seconds: int = Field(default=0, ge=0, le=86400, description="Sekunden für Alert-Vorhersagen")
+
+
+class IgnoreSettingsResponse(BaseModel):
+    """Response mit aktuellen Ignore-Einstellungen"""
+    ignore_bad_seconds: int
+    ignore_positive_seconds: int
+    ignore_alert_seconds: int
 
 

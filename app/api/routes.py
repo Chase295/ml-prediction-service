@@ -11,18 +11,29 @@ from app.api.schemas import (
     PredictRequest, PredictionResponse, PredictionResult, PredictionDetail,
     PredictionsListResponse, ModelInfo, ModelsListResponse, AvailableModelsResponse,
     AvailableModel, ModelImportRequest, ImportModelResponse, RenameModelRequest,
-    UpdateAlertThresholdRequest, UpdateN8nSettingsRequest, HealthResponse, StatsResponse, ModelStatisticsResponse
+    UpdateAlertThresholdRequest, UpdateN8nSettingsRequest, UpdateAlertConfigRequest,
+    UpdateIgnoreSettingsRequest, IgnoreSettingsResponse,
+    HealthResponse, StatsResponse, ModelStatisticsResponse
 )
 from app.database.connection import get_pool
 from app.database.models import (
     get_available_models, get_active_models, import_model,
     activate_model, deactivate_model, delete_active_model, rename_active_model,
-    update_alert_threshold, update_n8n_settings, save_prediction, get_predictions, get_latest_prediction, get_model_statistics,
-    get_n8n_status_for_model
+    update_alert_threshold, update_n8n_settings, update_alert_config, save_prediction, get_predictions, get_latest_prediction, get_model_statistics,
+    get_n8n_status_for_model, update_model_performance_metrics,
+    update_ignore_settings, get_ignore_settings
 )
 from app.database.alert_models import get_alerts, get_alert_details, get_alert_statistics, get_model_alert_statistics
 from app.prediction.engine import predict_coin_all_models
 from app.prediction.model_manager import download_model_file
+# from app.training.engine import train_model  # Training module entfernt
+# from app.training.model_loader import test_model  # Training module entfernt
+# from app.queue.job_manager import create_training_job, get_job_status  # Temporär deaktiviert
+# from app.database.models_ml_training import (  # Training module entfernt
+#     create_ml_model_job, get_ml_model, list_ml_models,
+#     create_test_job, create_comparison_job,
+#     get_ml_jobs, get_ml_job
+# )
 from app.utils.metrics import get_health_status, generate_metrics
 from app.utils.logging_config import get_logger, set_request_id
 from app.utils.config import MODEL_STORAGE_PATH
@@ -176,6 +187,66 @@ async def import_model_endpoint(request: ModelImportRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/models", response_model=ModelsListResponse)
+async def get_models_endpoint(include_inactive: str = "false"):
+    """
+    Liste aller Modelle (Alias für /models/active)
+    """
+    return await get_active_models_endpoint(include_inactive)
+
+
+@router.get("/models/{active_model_id}", response_model=ModelInfo)
+async def get_active_model_endpoint(active_model_id: int):
+    """
+    Details eines aktiven Modells abrufen
+    """
+    try:
+        # Hole alle aktiven Modelle und finde das richtige
+        models = await get_active_models(include_inactive=True)
+        model = next((m for m in models if m['id'] == active_model_id), None)
+
+        if not model:
+            raise HTTPException(status_code=404, detail="Modell nicht gefunden")
+
+        # Konvertiere zu ModelInfo Response
+        return ModelInfo(
+            id=model['id'],
+            model_id=model['model_id'],
+            name=model['name'],
+            custom_name=model.get('custom_name'),
+            model_type=model['model_type'],
+            target_variable=model['target_variable'],
+            target_operator=model.get('target_operator'),
+            target_value=model.get('target_value'),
+            future_minutes=model.get('future_minutes'),
+            price_change_percent=model.get('price_change_percent'),
+            target_direction=model.get('target_direction'),
+            features=model.get('features', []),
+            phases=model.get('phases'),
+            params=model.get('params'),
+            is_active=model.get('is_active', True),
+            total_predictions=model.get('total_predictions', 0),
+            last_prediction_at=model.get('last_prediction_at'),
+            alert_threshold=model.get('alert_threshold', 0.7),
+            n8n_webhook_url=model.get('n8n_webhook_url'),
+            n8n_send_mode=model.get('n8n_send_mode', 'all'),
+            n8n_enabled=model.get('n8n_enabled', True),
+            coin_filter_mode=model.get('coin_filter_mode', 'all'),
+            coin_whitelist=model.get('coin_whitelist'),
+            # 🔄 NEU: Coin-Ignore-Einstellungen
+            ignore_bad_seconds=model.get('ignore_bad_seconds'),
+            ignore_positive_seconds=model.get('ignore_positive_seconds'),
+            ignore_alert_seconds=model.get('ignore_alert_seconds'),
+            stats=model.get('stats'),
+            created_at=model.get('created_at')
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Laden des Modells {active_model_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/models/active", response_model=ModelsListResponse)
 async def get_active_models_endpoint(include_inactive: str = "false"):
     """
@@ -318,6 +389,106 @@ async def update_n8n_settings_endpoint(active_model_id: int, request: UpdateN8nS
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.patch("/models/{active_model_id}/alert-config", status_code=status.HTTP_200_OK)
+async def update_alert_config_endpoint(active_model_id: int, request: UpdateAlertConfigRequest):
+    """Aktualisiert komplette Alert-Konfiguration für ein aktives Modell"""
+    try:
+        success = await update_alert_config(
+            active_model_id=active_model_id,
+            n8n_webhook_url=request.n8n_webhook_url,
+            n8n_enabled=request.n8n_enabled,
+            n8n_send_mode=request.n8n_send_mode,
+            alert_threshold=request.alert_threshold,
+            coin_filter_mode=request.coin_filter_mode,
+            coin_whitelist=request.coin_whitelist
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden oder keine Änderungen vorgenommen")
+
+        return {
+            "message": f"Alert-Konfiguration für Modell {active_model_id} erfolgreich aktualisiert",
+            "active_model_id": active_model_id,
+            "config": {
+                "n8n_webhook_url": request.n8n_webhook_url,
+                "n8n_enabled": request.n8n_enabled,
+                "n8n_send_mode": request.n8n_send_mode,
+                "alert_threshold": request.alert_threshold,
+                "coin_filter_mode": request.coin_filter_mode,
+                "coin_whitelist": request.coin_whitelist
+            }
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Aktualisieren der Alert-Konfiguration: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/models/{active_model_id}/ignore-settings", status_code=status.HTTP_200_OK)
+async def update_ignore_settings_endpoint(
+    active_model_id: int,
+    request: UpdateIgnoreSettingsRequest,
+    pool: asyncpg.Pool = Depends(get_pool)
+):
+    """Aktualisiert Coin-Ignore-Einstellungen für ein Modell"""
+    logger.info(f"🔥 DEBUG API: Ignore-Settings Update für Modell {active_model_id}")
+    logger.info(f"🔥 DEBUG API: Eingehende Daten: bad={request.ignore_bad_seconds}, positive={request.ignore_positive_seconds}, alert={request.ignore_alert_seconds}")
+
+    try:
+        logger.info(f"🔥 DEBUG API: Rufe update_ignore_settings auf...")
+        success = await update_ignore_settings(
+            pool=pool,
+            active_model_id=active_model_id,
+            ignore_bad_seconds=request.ignore_bad_seconds,
+            ignore_positive_seconds=request.ignore_positive_seconds,
+            ignore_alert_seconds=request.ignore_alert_seconds
+        )
+        logger.info(f"🔥 DEBUG API: update_ignore_settings returned: {success}")
+
+        if not success:
+            logger.error(f"🔥 DEBUG API: Modell {active_model_id} nicht gefunden!")
+            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
+
+        response_data = {
+            "message": f"Coin-Ignore-Einstellungen für Modell {active_model_id} aktualisiert",
+            "active_model_id": active_model_id,
+            "ignore_bad_seconds": request.ignore_bad_seconds,
+            "ignore_positive_seconds": request.ignore_positive_seconds,
+            "ignore_alert_seconds": request.ignore_alert_seconds
+        }
+        logger.info(f"🔥 DEBUG API: Sende Response: {response_data}")
+        return response_data
+    except ValueError as e:
+        logger.error(f"🔥 DEBUG API: ValueError: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Aktualisieren der Ignore-Einstellungen: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models/{active_model_id}/ignore-settings", response_model=IgnoreSettingsResponse)
+async def get_ignore_settings_endpoint(
+    active_model_id: int,
+    pool: asyncpg.Pool = Depends(get_pool)
+):
+    """Holt aktuelle Coin-Ignore-Einstellungen für ein Modell"""
+    try:
+        settings = await get_ignore_settings(pool=pool, active_model_id=active_model_id)
+        if settings is None:
+            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
+
+        return IgnoreSettingsResponse(**settings)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Laden der Ignore-Einstellungen: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/models/{active_model_id}/n8n-status")
 async def get_n8n_status_endpoint(active_model_id: int):
     """Gibt den n8n-Status für ein Modell zurück"""
@@ -339,25 +510,124 @@ async def get_model_statistics_endpoint(active_model_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/debug/active-models", status_code=status.HTTP_200_OK)
+async def debug_active_models(pool: asyncpg.Pool = Depends(get_db_pool)):
+    """Debug: Zeigt alle aktiven Modelle"""
+    try:
+        from app.database.models import get_active_models
+        models = await get_active_models()
+        return {"active_models": models, "count": len(models)}
+    except Exception as e:
+        logger.error(f"❌ Debug Fehler: {e}", exc_info=True)
+        return {"error": str(e)}
+
+@router.get("/debug/coin-metrics", status_code=status.HTTP_200_OK)
+async def debug_coin_metrics(pool: asyncpg.Pool = Depends(get_db_pool)):
+    """Debug: Zeigt coin_metrics Statistiken"""
+    try:
+        # Hole Statistiken
+        row = await pool.fetchrow("""
+            SELECT COUNT(*) as total,
+                   MAX(timestamp) as latest,
+                   MIN(timestamp) as earliest,
+                   COUNT(DISTINCT mint) as unique_coins
+            FROM coin_metrics
+        """)
+        return dict(row) if row else {"message": "Keine Daten"}
+    except Exception as e:
+        logger.error(f"❌ Debug coin_metrics Fehler: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+@router.post("/admin/migrate-performance-metrics", status_code=status.HTTP_200_OK)
+async def migrate_performance_metrics():
+    """Führt die Datenbank-Migration für Performance-Metriken aus"""
+    try:
+        pool = await get_pool()
+
+        # Führe die Migration aus
+        await pool.execute("""
+            ALTER TABLE prediction_active_models
+            ADD COLUMN IF NOT EXISTS training_accuracy NUMERIC(5, 4),
+            ADD COLUMN IF NOT EXISTS training_f1 NUMERIC(5, 4),
+            ADD COLUMN IF NOT EXISTS training_precision NUMERIC(5, 4),
+            ADD COLUMN IF NOT EXISTS training_recall NUMERIC(5, 4),
+            ADD COLUMN IF NOT EXISTS roc_auc NUMERIC(5, 4),
+            ADD COLUMN IF NOT EXISTS mcc NUMERIC(5, 4),
+            ADD COLUMN IF NOT EXISTS confusion_matrix JSONB,
+            ADD COLUMN IF NOT EXISTS simulated_profit_pct NUMERIC(8, 4)
+        """)
+
+        # Füge Kommentare hinzu
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.training_accuracy IS 'Training Accuracy (0.0000-1.0000)'")
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.training_f1 IS 'Training F1-Score (0.0000-1.0000)'")
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.training_precision IS 'Training Precision (0.0000-1.0000)'")
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.training_recall IS 'Training Recall (0.0000-1.0000)'")
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.roc_auc IS 'ROC AUC Score (0.0000-1.0000)'")
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.mcc IS 'Matthews Correlation Coefficient (-1.0000-1.0000)'")
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.confusion_matrix IS 'Confusion Matrix als JSON: {\"tp\": int, \"tn\": int, \"fp\": int, \"fn\": int}'")
+        await pool.execute("COMMENT ON COLUMN prediction_active_models.simulated_profit_pct IS 'Simulierte Profitabilität in Prozent (-999.9999 bis 999.9999)'")
+
+        # Füge Indizes hinzu
+        await pool.execute("CREATE INDEX IF NOT EXISTS idx_active_models_accuracy ON prediction_active_models(training_accuracy)")
+        await pool.execute("CREATE INDEX IF NOT EXISTS idx_active_models_f1 ON prediction_active_models(training_f1)")
+        await pool.execute("CREATE INDEX IF NOT EXISTS idx_active_models_profit ON prediction_active_models(simulated_profit_pct)")
+
+        return {"message": "Performance-Metriken Migration erfolgreich ausgeführt"}
+
+    except Exception as e:
+        logger.error(f"❌ Fehler bei der Migration: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Migration fehlgeschlagen: {str(e)}")
+
+
+@router.post("/models/{active_model_id}/update-metrics", status_code=status.HTTP_200_OK)
+async def update_model_metrics_endpoint(active_model_id: int):
+    """Aktualisiert Performance-Metriken eines Modells aus dem Training-Service"""
+    try:
+        # Hole model_id aus der Datenbank
+        pool = await get_pool()
+        row = await pool.fetchrow("""
+            SELECT model_id FROM prediction_active_models WHERE id = $1
+        """, active_model_id)
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
+
+        model_id = row['model_id']
+
+        # Aktualisiere Metriken
+        success = await update_model_performance_metrics(active_model_id, model_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Fehler beim Aktualisieren der Metriken")
+
+        return {"message": f"Performance-Metriken für Modell {active_model_id} aktualisiert"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Aktualisieren der Metriken: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/models/{active_model_id}", status_code=status.HTTP_200_OK)
 async def delete_model_endpoint(active_model_id: int):
     """Löscht Modell (aus prediction_active_models + lokale Datei)"""
     try:
         logger.info(f"🗑️ Lösche Modell (active_model_id: {active_model_id})...")
-        
+
         # Hole Modell-Informationen für lokale Datei (auch inaktive Modelle prüfen)
         from app.database.models import get_active_models
         active_models = await get_active_models(include_inactive=True)
         model_to_delete = next((m for m in active_models if m['id'] == active_model_id), None)
-        
+
         if not model_to_delete:
             logger.warning(f"⚠️ Modell {active_model_id} nicht gefunden")
             raise HTTPException(status_code=404, detail=f"Modell {active_model_id} nicht gefunden")
-        
+
         model_id = model_to_delete.get('model_id')
         model_name = model_to_delete.get('name', 'Unknown')
         logger.info(f"🗑️ Lösche Modell: {model_name} (model_id: {model_id}, active_model_id: {active_model_id})")
-        
+
         # Lösche lokale Datei
         local_path = model_to_delete.get('local_model_path')
         if local_path and os.path.exists(local_path):
@@ -368,16 +638,16 @@ async def delete_model_endpoint(active_model_id: int):
                 logger.warning(f"⚠️ Fehler beim Löschen der lokalen Datei: {e}")
         elif local_path:
             logger.debug(f"ℹ️ Modell-Datei existiert nicht: {local_path}")
-        
+
         # Lösche aus DB
         success = await delete_active_model(active_model_id)
         if not success:
             logger.error(f"❌ Fehler beim Löschen aus Datenbank: active_model_id {active_model_id}")
             raise HTTPException(status_code=404, detail=f"Modell {active_model_id} konnte nicht aus Datenbank gelöscht werden")
-        
+
         logger.info(f"✅ Modell {active_model_id} erfolgreich gelöscht (model_id: {model_id})")
         return {
-            "message": f"Modell {active_model_id} gelöscht", 
+            "message": f"Modell {active_model_id} gelöscht",
             "active_model_id": active_model_id,
             "model_id": model_id,
             "model_name": model_name
@@ -393,18 +663,26 @@ async def delete_model_endpoint(active_model_id: int):
 # ============================================================
 
 @router.post("/predict", response_model=PredictionResponse)
-async def predict_endpoint(request: PredictRequest, pool: asyncpg.Pool = Depends(get_db_pool)):
+async def predict_endpoint(request: PredictRequest):
     """
     Manuelle Vorhersage für einen Coin.
-    
+
     Macht Vorhersagen mit allen aktiven Modellen (oder nur bestimmten).
     """
     try:
-        # Hole aktive Modelle
+        # Hole aktive Modelle (exakt wie in der Debug-Route)
+        from app.database.models import get_active_models
         active_models = await get_active_models()
-        
+        logger.info(f"🔍 Predict: {len(active_models)} aktive Modelle gefunden für coin {request.coin_id}")
+
         if not active_models:
-            raise HTTPException(status_code=400, detail="Keine aktiven Modelle gefunden")
+            logger.warning("⚠️ Predict: Keine aktiven Modelle gefunden")
+            # Debug: Verwende direkten Pool-Zugriff
+            pool = await get_pool()
+            active_models = await get_active_models()
+            logger.info(f"🔍 Predict: Nach direktem Pool-Zugriff: {len(active_models)} aktive Modelle gefunden")
+            if not active_models:
+                raise HTTPException(status_code=400, detail="Keine aktiven Modelle gefunden")
         
         # Filter nach model_ids (wenn angegeben)
         if request.model_ids:
@@ -415,6 +693,9 @@ async def predict_endpoint(request: PredictRequest, pool: asyncpg.Pool = Depends
         # Timestamp (aktuell wenn nicht angegeben)
         timestamp = request.timestamp or datetime.now(timezone.utc)
         
+        # Hole Pool für Vorhersagen
+        pool = await get_pool()
+
         # Mache Vorhersagen
         results = await predict_coin_all_models(
             coin_id=request.coin_id,
@@ -927,3 +1208,31 @@ async def delete_model_alerts_endpoint(active_model_id: int):
     except Exception as e:
         logger.error(f"❌ Fehler beim Löschen der Alerts: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# SYSTEM ROUTES
+# ============================================================================
+
+@router.post("/system/restart", status_code=status.HTTP_200_OK)
+async def restart_service():
+    """
+    Service-Neustart initiieren.
+
+    Diese Route zeigt nur eine Anleitung für den manuellen Neustart.
+    Ein automatischer Neustart ist aus technischen Gründen nicht möglich.
+    """
+    try:
+        logger.info("🔄 Service-Neustart angefordert")
+
+        return {
+            "message": "Führen Sie './restart_service.sh' aus oder starten Sie den Service manuell neu.",
+            "script_available": True,
+            "manual_command": "pkill -f uvicorn && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Service-Neustart: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+

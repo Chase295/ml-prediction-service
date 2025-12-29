@@ -57,3 +57,6 @@ Thumbs.db
 *.bak
 *.cache
 
+# Training Service (separates Repository)
+createmodelservice/
+

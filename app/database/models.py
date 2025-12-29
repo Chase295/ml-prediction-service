@@ -11,6 +11,10 @@ from datetime import datetime, timedelta, timezone
 import asyncpg
 import json
 from app.database.connection import get_pool
+from app.database.utils import from_jsonb
+from app.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # ============================================================
 # prediction_active_models - CRUD Operationen
@@ -96,12 +100,13 @@ async def get_model_from_training_service(model_id: int) -> Optional[Dict[str, A
     """
     pool = await get_pool()
     row = await pool.fetchrow("""
-        SELECT 
+        SELECT
             id, name, model_type, model_file_path,
             target_variable, target_operator, target_value,
             future_minutes, price_change_percent, target_direction,
             features, phases, params,
-            training_accuracy, training_f1,
+            training_accuracy, training_f1, training_precision, training_recall,
+            roc_auc, mcc, confusion_matrix, simulated_profit_pct,
             created_at
         FROM ml_models
         WHERE id = $1 AND status = 'READY' AND is_deleted = false
@@ -124,6 +129,11 @@ async def get_model_from_training_service(model_id: int) -> Optional[Dict[str, A
     if params is not None and isinstance(params, str):
         params = json.loads(params)
     
+    # Confusion Matrix konvertieren
+    confusion_matrix = row['confusion_matrix']
+    if confusion_matrix is not None and isinstance(confusion_matrix, str):
+        confusion_matrix = json.loads(confusion_matrix)
+
     return {
         'id': row['id'],
         'name': row['name'],
@@ -140,6 +150,12 @@ async def get_model_from_training_service(model_id: int) -> Optional[Dict[str, A
         'params': params,  # JSONB Object → Python Dict
         'training_accuracy': float(row['training_accuracy']) if row['training_accuracy'] else None,
         'training_f1': float(row['training_f1']) if row['training_f1'] else None,
+        'training_precision': float(row['training_precision']) if row['training_precision'] else None,
+        'training_recall': float(row['training_recall']) if row['training_recall'] else None,
+        'roc_auc': float(row['roc_auc']) if row['roc_auc'] else None,
+        'mcc': float(row['mcc']) if row['mcc'] else None,
+        'confusion_matrix': confusion_matrix,
+        'simulated_profit_pct': float(row['simulated_profit_pct']) if row['simulated_profit_pct'] else None,
         'created_at': row['created_at']
     }
 
@@ -159,7 +175,7 @@ async def get_active_models(include_inactive: bool = False) -> List[Dict[str, An
     where_clause = "WHERE is_active = true" if not include_inactive else ""
     
     rows = await pool.fetch(f"""
-        SELECT 
+        SELECT
             id, model_id, model_name, model_type,
             target_variable, target_operator, target_value,
             future_minutes, price_change_percent, target_direction,
@@ -168,7 +184,11 @@ async def get_active_models(include_inactive: bool = False) -> List[Dict[str, An
             is_active, last_prediction_at, total_predictions,
             downloaded_at, activated_at, created_at, updated_at,
             custom_name, alert_threshold,
-            n8n_webhook_url, n8n_send_mode, n8n_enabled
+            n8n_webhook_url, n8n_send_mode, n8n_enabled,
+            -- 🔄 NEU: Coin-Ignore-Einstellungen
+            ignore_bad_seconds, ignore_positive_seconds, ignore_alert_seconds,
+            training_accuracy, training_f1, training_precision, training_recall,
+            roc_auc, mcc, confusion_matrix, simulated_profit_pct
         FROM prediction_active_models
         {where_clause}
         ORDER BY is_active DESC, created_at DESC
@@ -272,6 +292,23 @@ async def get_active_models(include_inactive: bool = False) -> List[Dict[str, An
             'n8n_webhook_url': row.get('n8n_webhook_url'),
             'n8n_send_mode': row.get('n8n_send_mode', 'all'),
             'n8n_enabled': row['n8n_enabled'] if row['n8n_enabled'] is not None else True,
+            # 🔄 NEU: Coin-Ignore-Einstellungen
+            'ignore_bad_seconds': row['ignore_bad_seconds'] if row['ignore_bad_seconds'] is not None else 0,
+            'ignore_positive_seconds': row['ignore_positive_seconds'] if row['ignore_positive_seconds'] is not None else 0,
+            'ignore_alert_seconds': row['ignore_alert_seconds'] if row['ignore_alert_seconds'] is not None else 0,
+            # Performance-Metriken (beide Formate für Kompatibilität)
+            'accuracy': float(row['training_accuracy']) if row.get('training_accuracy') else None,
+            'f1_score': float(row['training_f1']) if row.get('training_f1') else None,
+            'precision': float(row['training_precision']) if row.get('training_precision') else None,
+            'recall': float(row['training_recall']) if row.get('training_recall') else None,
+            'training_accuracy': float(row['training_accuracy']) if row.get('training_accuracy') else None,
+            'training_f1': float(row['training_f1']) if row.get('training_f1') else None,
+            'training_precision': float(row['training_precision']) if row.get('training_precision') else None,
+            'training_recall': float(row['training_recall']) if row.get('training_recall') else None,
+            'roc_auc': float(row['roc_auc']) if row.get('roc_auc') else None,
+            'mcc': float(row['mcc']) if row.get('mcc') else None,
+            'confusion_matrix': row['confusion_matrix'],
+            'simulated_profit_pct': float(row['simulated_profit_pct']) if row.get('simulated_profit_pct') else None,
             # Statistiken
             'stats': {
                 'total_predictions': model_stats.get('total', 0),
@@ -320,15 +357,41 @@ async def import_model(
                 status = "aktiv" if is_active else "pausiert"
                 raise ValueError(f"Modell {model_id} ist bereits importiert (active_model_id: {existing_id}, Status: {status})")
             
-            # 2. Hole Metadaten aus ml_models
+            # 2. Hole Metadaten aus ml_models (lokal)
             model_data = await get_model_from_training_service(model_id)
             if not model_data:
                 raise ValueError(f"Modell {model_id} nicht gefunden oder nicht READY")
+
+            # 2.1 Ergänze mit zusätzlichen Metriken aus Training-Service API (falls verfügbar)
+            try:
+                import aiohttp
+                # Verwende die konfigurierte TRAINING_SERVICE_API_URL
+                import os
+                training_service_url = os.getenv('TRAINING_SERVICE_API_URL', 'http://host.docker.internal:8012/api')
+                if training_service_url.endswith('/api'):
+                    training_service_url = training_service_url[:-4]  # Entferne /api am Ende
+
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5.0)) as session:
+                    async with session.get(f"{training_service_url}/api/models/{model_id}") as response:
+                        if response.status == 200:
+                            training_data = await response.json()
+                            # Überschreibe lokale Metriken mit Training-Service Daten
+                            model_data.update({
+                                'training_accuracy': training_data.get('training_accuracy'),
+                                'training_f1': training_data.get('training_f1'),
+                                'training_precision': training_data.get('training_precision'),
+                                'training_recall': training_data.get('training_recall'),
+                                'roc_auc': training_data.get('roc_auc'),
+                                'mcc': training_data.get('mcc'),
+                                'confusion_matrix': training_data.get('confusion_matrix'),
+                                'simulated_profit_pct': training_data.get('simulated_profit_pct')
+                            })
+            except Exception as e:
+                logger.warning(f"Could not fetch additional metrics from training service: {e}")
+                # Continue with local data only
             
             # 3. Konvertiere JSONB-Felder zu JSON-Strings (asyncpg benötigt explizite Konvertierung)
             import json
-            from app.utils.logging_config import get_logger
-            logger = get_logger(__name__)
             
             # asyncpg erwartet JSON-Strings für JSONB-Felder, nicht Python-Listen/Dicts
             features_data = model_data['features']
@@ -363,6 +426,20 @@ async def import_model(
             
             # 4. Erstelle Eintrag in prediction_active_models (innerhalb der Transaktion)
             # Nutze jsonb() Funktion in PostgreSQL für explizite Konvertierung
+
+            # Performance-Metriken aus model_data extrahieren
+            training_accuracy = model_data.get('training_accuracy')
+            training_f1 = model_data.get('training_f1')
+            training_precision = model_data.get('training_precision')
+            training_recall = model_data.get('training_recall')
+            roc_auc = model_data.get('roc_auc')
+            mcc = model_data.get('mcc')
+            confusion_matrix = model_data.get('confusion_matrix')
+            simulated_profit_pct = model_data.get('simulated_profit_pct')
+
+            # Confusion Matrix als JSON konvertieren
+            confusion_matrix_json = json.dumps(confusion_matrix) if confusion_matrix else None
+
             try:
                 active_model_id = await conn.fetchval("""
                     INSERT INTO prediction_active_models (
@@ -371,8 +448,11 @@ async def import_model(
                         future_minutes, price_change_percent, target_direction,
                         features, phases, params,
                         local_model_path, model_file_url,
+                        training_accuracy, training_f1, training_precision, training_recall,
+                        roc_auc, mcc, confusion_matrix, simulated_profit_pct,
                         is_active, activated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13, $14, $15, NOW())
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13, $14,
+                              $15, $16, $17, $18, $19, $20, $21::jsonb, $22, $23, NOW())
                     RETURNING id
                 """,
                     model_id,
@@ -389,6 +469,14 @@ async def import_model(
                     params_json,  # JSONB (als JSON-String oder NULL)
                     local_model_path,
                     model_file_url,
+                    training_accuracy,
+                    training_f1,
+                    training_precision,
+                    training_recall,
+                    roc_auc,
+                    mcc,
+                    confusion_matrix_json,  # JSONB
+                    simulated_profit_pct,
                     True  # is_active
                 )
             except asyncpg.UniqueViolationError as e:
@@ -450,13 +538,14 @@ async def deactivate_model(active_model_id: int) -> bool:
 
 async def delete_active_model(active_model_id: int) -> bool:
     """
-    Löscht Modell aus prediction_active_models.
-    
+    Löscht Modell aus prediction_active_models UND alle zugehörigen Vorhersagen.
+
     ⚠️ WICHTIG: Löscht auch die lokale Modell-Datei!
-    
+    ⚠️ WICHTIG: Löscht ALLE Vorhersagen dieses Modells!
+
     Args:
         active_model_id: ID in prediction_active_models
-        
+
     Returns:
         True wenn erfolgreich, False wenn nicht gefunden
     """
@@ -472,7 +561,12 @@ async def delete_active_model(active_model_id: int) -> bool:
     if not row:
         return False
     
-    # 2. Lösche aus Datenbank
+    # 2. Lösche alle zugehörigen Vorhersagen
+    await pool.execute("""
+        DELETE FROM predictions WHERE active_model_id = $1
+    """, active_model_id)
+
+    # 3. Lösche aus Datenbank
     result = await pool.execute("""
         DELETE FROM prediction_active_models WHERE id = $1
     """, active_model_id)
@@ -515,6 +609,60 @@ async def update_alert_threshold(active_model_id: int, alert_threshold: float) -
         WHERE id = $2
     """, alert_threshold, active_model_id)
     
+    return result == "UPDATE 1"
+
+
+async def update_model_performance_metrics(active_model_id: int, model_id: int) -> bool:
+    """
+    Aktualisiert die Performance-Metriken eines bereits importierten Modells.
+    Holt die Metriken aus dem Training-Service und speichert sie in prediction_active_models.
+
+    Args:
+        active_model_id: ID in prediction_active_models
+        model_id: ID in ml_models
+
+    Returns:
+        True wenn erfolgreich, False wenn nicht
+    """
+    pool = await get_pool()
+
+    # Hole Metriken aus Training-Service
+    model_data = await get_model_from_training_service(model_id)
+    if not model_data:
+        return False
+
+    # Extrahiere Performance-Metriken
+    training_accuracy = model_data.get('training_accuracy')
+    training_f1 = model_data.get('training_f1')
+    training_precision = model_data.get('training_precision')
+    training_recall = model_data.get('training_recall')
+    roc_auc = model_data.get('roc_auc')
+    mcc = model_data.get('mcc')
+    confusion_matrix = model_data.get('confusion_matrix')
+    simulated_profit_pct = model_data.get('simulated_profit_pct')
+
+    # JSON für Confusion Matrix
+    import json
+    confusion_matrix_json = json.dumps(confusion_matrix) if confusion_matrix else None
+
+    # Update die Datenbank
+    result = await pool.execute("""
+        UPDATE prediction_active_models
+        SET training_accuracy = $1,
+            training_f1 = $2,
+            training_precision = $3,
+            training_recall = $4,
+            roc_auc = $5,
+            mcc = $6,
+            confusion_matrix = $7::jsonb,
+            simulated_profit_pct = $8,
+            updated_at = NOW()
+        WHERE id = $9
+    """,
+        training_accuracy, training_f1, training_precision, training_recall,
+        roc_auc, mcc, confusion_matrix_json, simulated_profit_pct, active_model_id
+    )
+
     return result == "UPDATE 1"
 
 
@@ -589,6 +737,302 @@ async def update_n8n_settings(active_model_id: int, n8n_webhook_url: Optional[st
     """
     result = await pool.execute(query, *params)
     return result == "UPDATE 1"
+
+
+async def update_alert_config(
+    active_model_id: int,
+    n8n_webhook_url: Optional[str] = None,
+    n8n_enabled: Optional[bool] = None,
+    n8n_send_mode: Optional[str] = None,
+    alert_threshold: Optional[float] = None,
+    coin_filter_mode: Optional[str] = None,
+    coin_whitelist: Optional[List[str]] = None
+) -> bool:
+    """
+    Aktualisiert komplette Alert-Konfiguration für ein aktives Modell.
+
+    Args:
+        active_model_id: ID des aktiven Modells
+        n8n_webhook_url: n8n Webhook URL (optional, None = löschen)
+        n8n_enabled: n8n aktiviert/deaktiviert (optional)
+        n8n_send_mode: Send-Mode ('all', 'alerts_only', 'positive_only', 'negative_only', optional)
+        alert_threshold: Alert-Threshold (0.0-1.0, optional)
+        coin_filter_mode: Coin-Filter Modus ('all' oder 'whitelist', optional)
+        coin_whitelist: Liste der erlaubten Coin-Mint-Adressen (optional)
+    """
+    pool = await get_pool()
+
+    update_fields = ["updated_at = NOW()"]
+    params = []
+    param_count = 0
+
+    # N8N Webhook URL
+    if n8n_webhook_url is not None:
+        param_count += 1
+        if n8n_webhook_url.strip() == "":
+            update_fields.append("n8n_webhook_url = NULL")
+        else:
+            update_fields.append(f"n8n_webhook_url = ${param_count}")
+            params.append(n8n_webhook_url.strip())
+
+    # N8N enabled
+    if n8n_enabled is not None:
+        param_count += 1
+        update_fields.append(f"n8n_enabled = ${param_count}")
+        params.append(n8n_enabled)
+
+    # N8N send mode
+    if n8n_send_mode is not None:
+        if n8n_send_mode not in ['all', 'alerts_only', 'positive_only', 'negative_only']:
+            raise ValueError(f"Ungültiger n8n_send_mode: {n8n_send_mode}")
+        param_count += 1
+        update_fields.append(f"n8n_send_mode = ${param_count}")
+        params.append(n8n_send_mode)
+
+    # Alert threshold
+    if alert_threshold is not None:
+        if not (0.0 <= alert_threshold <= 1.0):
+            raise ValueError(f"Alert threshold muss zwischen 0.0 und 1.0 liegen: {alert_threshold}")
+        param_count += 1
+        update_fields.append(f"alert_threshold = ${param_count}")
+        params.append(alert_threshold)
+
+    # Coin filter mode
+    if coin_filter_mode is not None:
+        if coin_filter_mode not in ['all', 'whitelist']:
+            raise ValueError(f"Ungültiger coin_filter_mode: {coin_filter_mode}")
+        param_count += 1
+        update_fields.append(f"coin_filter_mode = ${param_count}")
+        params.append(coin_filter_mode)
+
+    # Coin whitelist
+    if coin_whitelist is not None:
+        import json
+        param_count += 1
+        update_fields.append(f"coin_whitelist = ${param_count}")
+        params.append(json.dumps(coin_whitelist))
+
+    # Prüfe ob etwas zu aktualisieren ist
+    if len(update_fields) == 1:  # Nur updated_at
+        return True  # Nichts zu tun, aber erfolgreich
+
+    # Führe Update aus
+    param_count += 1
+    query = f"""
+        UPDATE prediction_active_models
+        SET {', '.join(update_fields)}
+        WHERE id = ${param_count}
+    """
+    params.append(active_model_id)
+
+    result = await pool.execute(query, *params)
+    return result == "UPDATE 1"
+
+
+# ============================================================
+# Coin Ignore Settings - Verwaltung
+# ============================================================
+
+async def update_ignore_settings(
+    pool: asyncpg.Pool,
+    active_model_id: int,
+    ignore_bad_seconds: int,
+    ignore_positive_seconds: int,
+    ignore_alert_seconds: int
+) -> bool:
+    """
+    Aktualisiert Coin-Ignore-Einstellungen für ein Modell.
+
+    Args:
+        pool: Database connection pool
+        active_model_id: ID des aktiven Modells
+        ignore_bad_seconds: Sekunden für schlechte Vorhersagen (0-86400)
+        ignore_positive_seconds: Sekunden für positive Vorhersagen (0-86400)
+        ignore_alert_seconds: Sekunden für Alert-Vorhersagen (0-86400)
+
+    Returns:
+        True wenn erfolgreich, False wenn Modell nicht gefunden
+    """
+    try:
+        logger.info(f"🔥 DEBUG DB: update_ignore_settings called für Modell {active_model_id}")
+        logger.info(f"🔥 DEBUG DB: Parameter: bad={ignore_bad_seconds}, positive={ignore_positive_seconds}, alert={ignore_alert_seconds}")
+
+        # Validiere Eingaben
+        if not all(0 <= val <= 86400 for val in [ignore_bad_seconds, ignore_positive_seconds, ignore_alert_seconds]):
+            logger.error(f"🔥 DEBUG DB: Validierung fehlgeschlagen!")
+            raise ValueError("Alle Ignore-Zeiten müssen zwischen 0 und 86400 Sekunden liegen")
+
+        logger.info(f"🔥 DEBUG DB: Führe SQL-Update aus...")
+        result = await pool.execute("""
+            UPDATE prediction_active_models
+            SET
+                ignore_bad_seconds = $2,
+                ignore_positive_seconds = $3,
+                ignore_alert_seconds = $4,
+                updated_at = NOW()
+            WHERE id = $1
+        """, active_model_id, ignore_bad_seconds, ignore_positive_seconds, ignore_alert_seconds)
+
+        logger.info(f"🔥 DEBUG DB: SQL-Result: '{result}'")
+        success = result == "UPDATE 1"
+        logger.info(f"🔥 DEBUG DB: Operation erfolgreich: {success}")
+
+        # 🔥 DEBUG: Überprüfe die gespeicherten Werte sofort
+        if success:
+            verify_result = await pool.fetchrow("""
+                SELECT ignore_bad_seconds, ignore_positive_seconds, ignore_alert_seconds
+                FROM prediction_active_models
+                WHERE id = $1
+            """, active_model_id)
+            logger.info(f"🔥 DEBUG DB: Verifizierte gespeicherte Werte: {dict(verify_result) if verify_result else 'NULL'}")
+
+        return success
+    except Exception as e:
+        logger.error(f"🔥 DEBUG DB: Fehler beim Update der Ignore-Einstellungen für Modell {active_model_id}: {e}")
+        return False
+
+
+async def get_ignore_settings(pool: asyncpg.Pool, active_model_id: int) -> Optional[Dict[str, int]]:
+    """
+    Holt aktuelle Coin-Ignore-Einstellungen für ein Modell.
+
+    Args:
+        pool: Database connection pool
+        active_model_id: ID des aktiven Modells
+
+    Returns:
+        Dict mit ignore_bad_seconds, ignore_positive_seconds, ignore_alert_seconds oder None
+    """
+    try:
+        row = await pool.fetchrow("""
+            SELECT ignore_bad_seconds, ignore_positive_seconds, ignore_alert_seconds
+            FROM prediction_active_models
+            WHERE id = $1
+        """, active_model_id)
+
+        if row:
+            return {
+                "ignore_bad_seconds": row['ignore_bad_seconds'] or 0,
+                "ignore_positive_seconds": row['ignore_positive_seconds'] or 0,
+                "ignore_alert_seconds": row['ignore_alert_seconds'] or 0
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Fehler beim Laden der Ignore-Einstellungen für Modell {active_model_id}: {e}")
+        return None
+
+
+# ============================================================
+# Coin Scan Cache - Verwaltung
+# ============================================================
+
+async def check_coin_ignore_status(
+    pool: asyncpg.Pool,
+    coin_id: str,
+    active_model_id: int
+) -> Optional[Dict[str, Any]]:
+    """
+    Prüft, ob ein Coin aktuell ignoriert werden soll.
+
+    Args:
+        pool: Database connection pool
+        coin_id: Coin-Mint-Adresse
+        active_model_id: ID des aktiven Modells
+
+    Returns:
+        Dict mit should_ignore, ignore_until, ignore_reason, remaining_seconds oder None
+    """
+    try:
+        row = await pool.fetchrow("""
+            SELECT ignore_until, ignore_reason, last_scan_at
+            FROM coin_scan_cache
+            WHERE coin_id = $1 AND active_model_id = $2
+        """, coin_id, active_model_id)
+
+        if row and row['ignore_until']:
+            now = datetime.now(timezone.utc)
+            if now < row['ignore_until']:
+                return {
+                    "should_ignore": True,
+                    "ignore_until": row['ignore_until'],
+                    "ignore_reason": row['ignore_reason'],
+                    "remaining_seconds": (row['ignore_until'] - now).total_seconds()
+                }
+
+        return {"should_ignore": False}
+    except Exception as e:
+        logger.error(f"Fehler beim Prüfen des Ignore-Status für Coin {coin_id}: {e}")
+        return {"should_ignore": False}
+
+
+async def update_coin_scan_cache(
+    pool: asyncpg.Pool,
+    coin_id: str,
+    active_model_id: int,
+    prediction: int,
+    probability: float,
+    alert_threshold: float,
+    ignore_bad_seconds: int,
+    ignore_positive_seconds: int,
+    ignore_alert_seconds: int
+):
+    """
+    Aktualisiert den Scan-Cache für einen Coin nach einer Vorhersage.
+
+    Args:
+        pool: Database connection pool
+        coin_id: Coin-Mint-Adresse
+        active_model_id: ID des aktiven Modells
+        prediction: Vorhersage-Ergebnis (0 oder 1)
+        probability: Wahrscheinlichkeit der Vorhersage
+        alert_threshold: Schwellenwert für Alerts
+        ignore_bad_seconds: Sekunden für schlechte Vorhersagen
+        ignore_positive_seconds: Sekunden für positive Vorhersagen
+        ignore_alert_seconds: Sekunden für Alert-Vorhersagen
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        was_alert = probability >= alert_threshold
+
+        # Bestimme Ignore-Dauer basierend auf Ergebnis
+        ignore_seconds = 0
+        ignore_reason = None
+
+        if prediction == 0 and ignore_bad_seconds > 0:  # Schlechte Vorhersage
+            ignore_seconds = ignore_bad_seconds
+            ignore_reason = "bad"
+        elif prediction == 1 and ignore_positive_seconds > 0:  # Positive Vorhersage
+            ignore_seconds = ignore_positive_seconds
+            ignore_reason = "positive"
+        elif was_alert and ignore_alert_seconds > 0:  # Alert
+            ignore_seconds = ignore_alert_seconds
+            ignore_reason = "alert"
+
+        ignore_until = now + timedelta(seconds=ignore_seconds) if ignore_seconds > 0 else None
+
+        # Update oder Insert
+        await pool.execute("""
+            INSERT INTO coin_scan_cache (
+                coin_id, active_model_id, last_scan_at, last_prediction,
+                last_probability, was_alert, ignore_until, ignore_reason, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $3)
+            ON CONFLICT (coin_id, active_model_id)
+            DO UPDATE SET
+                last_scan_at = EXCLUDED.last_scan_at,
+                last_prediction = EXCLUDED.last_prediction,
+                last_probability = EXCLUDED.last_probability,
+                was_alert = EXCLUDED.was_alert,
+                ignore_until = EXCLUDED.ignore_until,
+                ignore_reason = EXCLUDED.ignore_reason,
+                updated_at = EXCLUDED.updated_at
+        """, coin_id, active_model_id, now, prediction, probability, was_alert, ignore_until, ignore_reason)
+
+        if ignore_seconds > 0:
+            logger.debug(f"🚫 Coin {coin_id[:8]}... wird für {ignore_seconds}s ignoriert ({ignore_reason})")
+
+    except Exception as e:
+        logger.error(f"Fehler beim Update des Scan-Cache für Coin {coin_id}: {e}")
+
 
 # ============================================================
 # predictions - CRUD Operationen
@@ -1439,3 +1883,22 @@ async def create_alert_if_needed(
     
     logger.info(f"✅ Alert {alert_id} erfolgreich erstellt für Vorhersage {prediction_id} (Coin: {coin_id[:20]}..., Probability: {probability:.2%}, Threshold: {alert_threshold:.2%})")
     return alert_id
+
+
+# ============================================================
+# ML TRAINING FUNCTIONS - Integration aus ML Training Service
+# ============================================================
+
+async def get_model_type_defaults(model_type: str) -> Dict[str, Any]:
+    """Lade Default-Parameter für Modell-Typ aus ref_model_types"""
+    import json
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT default_params FROM ref_model_types WHERE name = $1",
+        model_type
+    )
+    if row and row["default_params"]:
+        # Refactored: nutze Helper-Funktion
+        params = from_jsonb(row["default_params"])
+        return params if params is not None else {}
+    return {}

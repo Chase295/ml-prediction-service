@@ -1,0 +1,67 @@
+# Docker Compose für React + FastAPI Setup
+# Für Entwicklung und Testing der Migration
+
+version: '3.8'
+
+services:
+  # FastAPI Backend (unverändert)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/ml_predictions
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-}
+    depends_on:
+      - db
+    volumes:
+      - ./models:/app/models
+      - ./logs:/app/logs
+    networks:
+      - ml-network
+    restart: unless-stopped
+
+  # React Frontend (neu)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000/api
+    depends_on:
+      - backend
+    networks:
+      - ml-network
+    restart: unless-stopped
+    # Für Development: Volume-Mount für Hot-Reload
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - /app/node_modules
+
+  # PostgreSQL Database
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=ml_predictions
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    networks:
+      - ml-network
+    restart: unless-stopped
+
+networks:
+  ml-network:
+    driver: bridge
+
+volumes:
+  postgres_data:

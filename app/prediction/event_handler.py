@@ -10,7 +10,10 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 import asyncpg
 from app.database.connection import get_pool, DB_DSN
-from app.database.models import get_active_models, save_prediction
+from app.database.models import (
+    get_active_models, save_prediction,
+    check_coin_ignore_status, update_coin_scan_cache
+)
 from app.prediction.engine import predict_coin_all_models
 from app.prediction.n8n_client import send_to_n8n
 from app.utils.config import POLLING_INTERVAL_SECONDS, BATCH_SIZE, BATCH_TIMEOUT_SECONDS
@@ -191,9 +194,13 @@ class EventHandler:
             logger.warning("⚠️ Keine aktiven Modelle - überspringe Vorhersagen")
             return
         
-        # Verarbeite jeden Coin
+        # Verarbeite jeden Coin mit Ignore-Logik
         model_names = [m.get('custom_name') or m.get('name', 'Unknown') for m in self.active_models]
         logger.info(f"📊 Verarbeite {len(coin_entries)} Coin-Einträge mit {len(self.active_models)} aktiven Modellen: {', '.join(model_names)}")
+
+        total_processed = 0
+        total_ignored = 0
+
         for entry in coin_entries:
             coin_id = entry.get('mint')
             timestamp_str = entry.get('timestamp')
@@ -203,60 +210,122 @@ class EventHandler:
                 continue
             
             logger.debug(f"🪙 Verarbeite Coin: {coin_id[:20]}... am {timestamp_str}")
-            
+
             # Parse timestamp
             try:
                 if isinstance(timestamp_str, str):
                     timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
                 else:
                     timestamp = timestamp_str
-                
+
                 if timestamp.tzinfo is None:
                     timestamp = timestamp.replace(tzinfo=timezone.utc)
             except Exception as e:
                 logger.error(f"❌ Fehler beim Parsen von Timestamp: {e}")
                 continue
-            
+
+            # 🔄 COIN-IGNORE-LOGIK: Prüfe für jedes Modell separat
+            models_to_process = []
+
+            for model_config in self.active_models:
+                model_id = model_config.get('id')
+
+                # Hole Ignore-Einstellungen
+                ignore_bad = model_config.get('ignore_bad_seconds', 0)
+                ignore_positive = model_config.get('ignore_positive_seconds', 0)
+                ignore_alert = model_config.get('ignore_alert_seconds', 0)
+                alert_threshold = model_config.get('alert_threshold', 0.7)
+
+                # Nur prüfen, wenn überhaupt Ignore-Timings konfiguriert sind
+                should_ignore = False
+                ignore_reason = None
+                remaining_seconds = 0
+
+                if ignore_bad > 0 or ignore_positive > 0 or ignore_alert > 0:
+                    ignore_status = await check_coin_ignore_status(pool, coin_id, model_id)
+
+                    if ignore_status.get('should_ignore'):
+                        should_ignore = True
+                        ignore_reason = ignore_status.get('ignore_reason')
+                        remaining_seconds = ignore_status.get('remaining_seconds', 0)
+
+                        logger.info(f"🚫 Coin {coin_id[:8]}... wird von Modell {model_id} ignoriert ({ignore_reason}) - noch {remaining_seconds:.1f}s")
+                        total_ignored += 1
+                        continue
+
+                # Coin soll nicht ignoriert werden - zur Verarbeitungsliste hinzufügen
+                models_to_process.append(model_config)
+
+            # Überspringe diesen Coin komplett, wenn alle Modelle ihn ignorieren
+            if not models_to_process:
+                logger.debug(f"🚫 Coin {coin_id[:8]}... wird von allen Modellen ignoriert - überspringe")
+                continue
+
             try:
-                logger.info(f"🔮 Starte Vorhersagen für Coin {coin_id[:20]}... mit {len(self.active_models)} Modellen")
-                # Mache Vorhersagen mit allen Modellen
+                logger.info(f"🔮 Starte Vorhersagen für Coin {coin_id[:20]}... mit {len(models_to_process)} von {len(self.active_models)} Modellen")
+
+                # Mache Vorhersagen nur mit den Modellen, die den Coin nicht ignorieren
                 results = await predict_coin_all_models(
                     coin_id=coin_id,
                     timestamp=timestamp,
-                    active_models=self.active_models,
+                    active_models=models_to_process,  # Nur nicht-ignorierende Modelle
                     pool=pool
                 )
-                
+
                 logger.info(f"✅ {len(results)} Vorhersagen erstellt für Coin {coin_id[:20]}...")
-                
-                # Speichere Vorhersagen in DB
+                total_processed += len(results)
+
+                # Speichere Vorhersagen in DB und aktualisiere Cache
                 for result in results:
                     try:
+                        model_id = result.get('active_model_id')
+                        prediction = result['prediction']
+                        probability = result['probability']
+
+                        # Speichere Vorhersage
                         await save_prediction(
                             coin_id=coin_id,
                             data_timestamp=timestamp,
                             model_id=result['model_id'],
-                            active_model_id=result.get('active_model_id'),
-                            prediction=result['prediction'],
-                            probability=result['probability'],
+                            active_model_id=model_id,
+                            prediction=prediction,
+                            probability=probability,
                             phase_id_at_time=entry.get('phase_id'),
-                            prediction_duration_ms=None  # Wird später hinzugefügt
+                            prediction_duration_ms=None
                         )
+
+                        # 🔄 CACHE-AKTUALISIERUNG: Nach erfolgreicher Vorhersage
+                        if model_id:
+                            # Finde das entsprechende Modell-Config
+                            model_config = next((m for m in models_to_process if m.get('id') == model_id), None)
+                            if model_config:
+                                await update_coin_scan_cache(
+                                    pool=pool,
+                                    coin_id=coin_id,
+                                    active_model_id=model_id,
+                                    prediction=prediction,
+                                    probability=probability,
+                                    alert_threshold=model_config.get('alert_threshold', 0.7),
+                                    ignore_bad_seconds=model_config.get('ignore_bad_seconds', 0),
+                                    ignore_positive_seconds=model_config.get('ignore_positive_seconds', 0),
+                                    ignore_alert_seconds=model_config.get('ignore_alert_seconds', 0)
+                                )
+
                     except Exception as e:
-                        logger.error(f"❌ Fehler beim Speichern der Vorhersage: {e}")
-                
-                # Sende ALLE Vorhersagen an n8n (nicht nur Alerts!)
+                        logger.error(f"❌ Fehler beim Speichern/Aktualisieren für Modell {model_id}: {e}")
+
+                # Sende Vorhersagen an n8n (nur für tatsächlich verarbeitete Modelle)
                 if results:
-                    logger.info(f"📤 Rufe send_to_n8n auf mit {len(results)} Vorhersagen und {len(self.active_models)} aktiven Modellen")
+                    logger.info(f"📤 Sende {len(results)} Vorhersagen an n8n")
                     result = await send_to_n8n(
                         coin_id=coin_id,
                         timestamp=timestamp,
                         predictions=results,
-                        active_models=self.active_models
+                        active_models=models_to_process  # Nur die verarbeiteten Modelle
                     )
-                    logger.info(f"📤 send_to_n8n Ergebnis: {result}")
+                    logger.info(f"📤 n8n Ergebnis: {result}")
                 else:
-                    logger.warning(f"⚠️ Keine Vorhersagen-Ergebnisse für Coin {coin_id[:8]}... - nichts an n8n zu senden")
+                    logger.warning(f"⚠️ Keine Vorhersagen für Coin {coin_id[:8]}...")
                 
             except Exception as e:
                 logger.error(
@@ -264,7 +333,10 @@ class EventHandler:
                     exc_info=True
                 )
                 continue
-    
+
+        # 📊 Zusammenfassung der Verarbeitung
+        logger.info(f"📊 Batch-Verarbeitung abgeschlossen: {total_processed} Vorhersagen erstellt, {total_ignored} Coins/Modelle ignoriert")
+
     async def start_polling_fallback(self):
         """Polling-Fallback wenn LISTEN/NOTIFY nicht verfügbar"""
         pool = await get_pool()
@@ -315,7 +387,8 @@ class EventHandler:
             except Exception as e:
                 logger.error(f"❌ Fehler im Polling-Loop: {e}", exc_info=True)
                 await asyncio.sleep(POLLING_INTERVAL_SECONDS)
-    
+
+
     async def start(self):
         """Startet Event-Handler"""
         self.running = True
@@ -402,3 +475,15 @@ class EventHandler:
         logger.info("✅ Event-Handler gestoppt")
 
 
+
+
+
+async def main():
+    """Main entry point for running the event handler"""
+    handler = EventHandler()
+    await handler.start()
+
+
+if __name__ == "__main__":
+    # Wird ausgeführt wenn das Modul direkt gestartet wird
+    asyncio.run(main())
