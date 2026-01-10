@@ -31,10 +31,8 @@ services:
     expose:
       - "8000"  # Nicht nach außen exponieren, nur intern
     environment:
-      - DATABASE_URL=postgresql://user:password@db:5432/ml_predictions
+      # Konfiguration wird aus persistentem Config-Volume geladen
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-}
-      # Training Service für Modell-Import
-      - TRAINING_SERVICE_API_URL=${TRAINING_SERVICE_API_URL:-http://localhost:8001/api}
     volumes:
       - ./models:/app/models
       - ./logs:/app/logs
