@@ -1,16 +1,14 @@
 # Docker Compose für React + FastAPI Setup (ohne lokale DB)
 # Backend und Frontend Services - Datenbank läuft extern
 
-version: '3.8'
-
 services:
   # FastAPI Backend
   backend:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"  # Nicht nach außen exponieren, nur intern
     environment:
       # Externe Datenbank - bitte in .env oder Environment setzen
       - DATABASE_URL=${DATABASE_URL:-postgresql://user:pass@localhost:5432/crypto}
@@ -20,9 +18,11 @@ services:
     volumes:
       - ./models:/app/models
       - ./logs:/app/logs
+    networks:
+      - ml-network
     restart: unless-stopped
 
-  # React Frontend
+  # React Frontend (dient als Proxy für API)
   frontend:
     build:
       context: ./frontend
@@ -30,13 +30,19 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - REACT_APP_API_URL=http://localhost:8000/api
+      - REACT_APP_API_URL=/api  # Relative URL für API über gleichen Port
     depends_on:
       - backend
+    networks:
+      - ml-network
     restart: unless-stopped
     # Für Development: Volume-Mount für Hot-Reload
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
       - /app/node_modules
+
+networks:
+  ml-network:
+    driver: bridge
 
