@@ -102,8 +102,8 @@ MODEL_CACHE_SIZE = int(os.getenv("MODEL_CACHE_SIZE", "10"))
 # ============================================================
 # n8n Integration
 # ============================================================
-N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL",
-                _persistent_config.get("n8n_webhook_url") or None)  # Optional
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL") or \
+                (_persistent_config.get("n8n_webhook_url") if _persistent_config.get("n8n_webhook_url") else None)  # Optional
 N8N_WEBHOOK_TIMEOUT = int(os.getenv("N8N_WEBHOOK_TIMEOUT", "5"))  # Sekunden
 DEFAULT_ALERT_THRESHOLD = float(os.getenv("DEFAULT_ALERT_THRESHOLD", "0.7"))  # 0.0 - 1.0
 
