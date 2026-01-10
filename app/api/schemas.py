@@ -241,3 +241,29 @@ class IgnoreSettingsResponse(BaseModel):
     ignore_bad_seconds: int
     ignore_positive_seconds: int
     ignore_alert_seconds: int
+
+# ============================================================
+# Konfiguration (UI-änderbar)
+# ============================================================
+
+class ConfigResponse(BaseModel):
+    """Response mit aktueller Konfiguration"""
+    success: bool
+    config: Dict[str, Any]
+    timestamp: str
+
+class ConfigUpdateRequest(BaseModel):
+    """Request für Konfigurations-Update"""
+    database_url: Optional[str] = None
+    training_service_url: Optional[str] = None
+    n8n_webhook_url: Optional[str] = None
+    api_port: Optional[int] = None
+    streamlit_port: Optional[int] = None
+
+class ConfigUpdateResponse(BaseModel):
+    """Response nach Konfigurations-Update"""
+    success: bool
+    message: str
+    config: Dict[str, Any]
+    requires_restart: bool
+    timestamp: str

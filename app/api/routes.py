@@ -23,6 +23,7 @@ from app.database.models import (
     get_n8n_status_for_model, update_model_performance_metrics,
     update_ignore_settings, get_ignore_settings
 )
+from app.utils.config import load_persistent_config, save_persistent_config
 from app.database.alert_models import get_alerts, get_alert_details, get_alert_statistics, get_model_alert_statistics
 from app.prediction.engine import predict_coin_all_models
 from app.prediction.model_manager import download_model_file
@@ -1241,3 +1242,57 @@ async def restart_service():
     except Exception as e:
         logger.error(f"❌ Fehler beim Service-Neustart: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/config")
+async def get_config():
+    """
+    Aktuelle persistente Konfiguration abrufen.
+    """
+    try:
+        config = load_persistent_config()
+        return {
+            "success": True,
+            "config": config,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Laden der Konfiguration: {e}")
+        raise HTTPException(status_code=500, detail=f"Konfiguration konnte nicht geladen werden: {e}")
+
+@router.post("/config")
+async def update_config(config_update: Dict[str, Any]):
+    """
+    Persistente Konfiguration aktualisieren.
+    """
+    try:
+        # Lade aktuelle Konfiguration
+        current_config = load_persistent_config()
+
+        # Aktualisiere mit neuen Werten
+        updated_config = {**current_config, **config_update}
+
+        # Validiere wichtige Felder
+        if "database_url" in updated_config and not updated_config["database_url"].startswith("postgresql://"):
+            raise HTTPException(status_code=400, detail="Datenbank-URL muss mit 'postgresql://' beginnen")
+
+        if "training_service_url" in updated_config and not updated_config["training_service_url"].startswith("http"):
+            raise HTTPException(status_code=400, detail="Training-Service-URL muss mit 'http' beginnen")
+
+        # Speichere neue Konfiguration
+        if save_persistent_config(updated_config):
+            logger.info("✅ Konfiguration erfolgreich aktualisiert")
+            return {
+                "success": True,
+                "message": "Konfiguration wurde gespeichert. Service-Neustart erforderlich.",
+                "config": updated_config,
+                "requires_restart": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Konfiguration konnte nicht gespeichert werden")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Fehler beim Aktualisieren der Konfiguration: {e}")
+        raise HTTPException(status_code=500, detail=f"Konfiguration konnte nicht aktualisiert werden: {e}")

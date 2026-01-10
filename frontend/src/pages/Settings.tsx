@@ -15,9 +15,12 @@ import PageContainer from '../components/layout/PageContainer';
 import { modelsApi } from '../services/api';
 
 const Settings: React.FC = () => {
-  const [apiUrl, setApiUrl] = React.useState('http://localhost:8000/api');
-  const [trainingServiceUrl, setTrainingServiceUrl] = React.useState('http://ml-training-service:8000/api');
-  const [dbDsn, setDbDsn] = React.useState('postgresql://user:pass@localhost:5432/crypto');
+  // Persistente Konfiguration (wird im Backend gespeichert)
+  const [databaseUrl, setDatabaseUrl] = React.useState('');
+  const [trainingServiceUrl, setTrainingServiceUrl] = React.useState('');
+  const [n8nWebhookUrl, setN8nWebhookUrl] = React.useState('');
+  const [apiPort, setApiPort] = React.useState(8000);
+  const [streamlitPort, setStreamlitPort] = React.useState(8501);
   const [saved, setSaved] = React.useState(false);
 
   // Service neu starten
@@ -35,13 +38,38 @@ const Settings: React.FC = () => {
     }
   });
 
+  // Konfiguration laden
+  const configQuery = useQuery({
+    queryKey: ['config'],
+    queryFn: modelsApi.getConfig,
+    staleTime: 30000, // 30 Sekunden cache
+  });
+
+  // Konfiguration speichern
+  const saveConfigMutation = useMutation({
+    mutationFn: modelsApi.updateConfig,
+    onSuccess: (data) => {
+      console.log('Config saved:', data);
+      setSaved(true);
+      // Invalidate config query um neue Daten zu laden
+      queryClient.invalidateQueries({ queryKey: ['config'] });
+    },
+    onError: (error) => {
+      console.error('Fehler beim Speichern der Konfiguration:', error);
+    }
+  });
+
   const handleSave = () => {
-    // Hier könnten die Einstellungen gespeichert werden
-    localStorage.setItem('apiUrl', apiUrl);
-    localStorage.setItem('trainingServiceUrl', trainingServiceUrl);
-    localStorage.setItem('dbDsn', dbDsn);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    // Speichere persistente Konfiguration über API
+    const configUpdate = {
+      database_url: databaseUrl,
+      training_service_url: trainingServiceUrl,
+      n8n_webhook_url: n8nWebhookUrl,
+      api_port: apiPort,
+      streamlit_port: streamlitPort,
+    };
+
+    saveConfigMutation.mutate(configUpdate);
   };
 
   const handleReset = () => {
@@ -57,16 +85,17 @@ const Settings: React.FC = () => {
     restartMutation.mutate();
   };
 
+  // Lade Konfiguration beim ersten Laden
   React.useEffect(() => {
-    // Lade gespeicherte Einstellungen
-    const savedApiUrl = localStorage.getItem('apiUrl');
-    const savedTrainingServiceUrl = localStorage.getItem('trainingServiceUrl');
-    const savedDbDsn = localStorage.getItem('dbDsn');
-
-    if (savedApiUrl) setApiUrl(savedApiUrl);
-    if (savedTrainingServiceUrl) setTrainingServiceUrl(savedTrainingServiceUrl);
-    if (savedDbDsn) setDbDsn(savedDbDsn);
-  }, []);
+    if (configQuery.data?.config) {
+      const config = configQuery.data.config;
+      setDatabaseUrl(config.database_url || '');
+      setTrainingServiceUrl(config.training_service_url || '');
+      setN8nWebhookUrl(config.n8n_webhook_url || '');
+      setApiPort(config.api_port || 8000);
+      setStreamlitPort(config.streamlit_port || 8501);
+    }
+  }, [configQuery.data]);
 
   return (
     <PageContainer>
@@ -118,15 +147,36 @@ const Settings: React.FC = () => {
         <Box sx={{ mt: 2 }}>
           <TextField
             fullWidth
-            label="Datenbank-Verbindungsstring"
-            value={dbDsn}
-            onChange={(e) => setDbDsn(e.target.value)}
+            label="Datenbank-URL"
+            value={databaseUrl}
+            onChange={(e) => setDatabaseUrl(e.target.value)}
             variant="outlined"
             sx={{ mb: 2 }}
-            helperText="PostgreSQL DSN (nur für Entwicklung/Tests)"
+            helperText="PostgreSQL-Verbindungsstring (wird persistent gespeichert)"
+            placeholder="postgresql://user:password@host:port/database"
           />
-          <Alert severity="warning" sx={{ mb: 0 }}>
-            <strong>⚠️ Sicherheitshinweis:</strong> Datenbank-Verbindungsdaten sollten normalerweise nicht über die Web-UI geändert werden. Verwenden Sie Environment-Variablen in der Produktion.
+          <TextField
+            fullWidth
+            label="Training-Service-URL"
+            value={trainingServiceUrl}
+            onChange={(e) => setTrainingServiceUrl(e.target.value)}
+            variant="outlined"
+            sx={{ mb: 2 }}
+            helperText="URL des Training-Services für Modell-Downloads"
+            placeholder="http://training-service:8001/api"
+          />
+          <TextField
+            fullWidth
+            label="n8n Webhook-URL (optional)"
+            value={n8nWebhookUrl}
+            onChange={(e) => setN8nWebhookUrl(e.target.value)}
+            variant="outlined"
+            sx={{ mb: 2 }}
+            helperText="Webhook-URL für n8n-Integration"
+            placeholder="https://n8n.example.com/webhook/..."
+          />
+          <Alert severity="info" sx={{ mb: 0 }}>
+            <strong>💾 Persistente Konfiguration:</strong> Diese Einstellungen werden dauerhaft gespeichert und überleben Service-Neustarts. Ein Neustart ist nach Änderungen erforderlich.
           </Alert>
         </Box>
       </Paper>
@@ -138,9 +188,10 @@ const Settings: React.FC = () => {
             variant="contained"
             color="primary"
             onClick={handleSave}
+            disabled={saveConfigMutation.isPending || configQuery.isLoading}
             size="large"
           >
-            Einstellungen speichern
+            {saveConfigMutation.isPending ? 'Speichere...' : 'Konfiguration speichern'}
           </Button>
           <Button
             variant="outlined"
@@ -162,7 +213,20 @@ const Settings: React.FC = () => {
 
           {saved && (
             <Alert severity="success" sx={{ ml: 2 }}>
-              Einstellungen gespeichert!
+              ✅ Konfiguration gespeichert!
+            </Alert>
+          )}
+
+          {saveConfigMutation.isSuccess && (
+            <Alert severity="success" sx={{ ml: 2 }}>
+              <strong>✅ Konfiguration gespeichert!</strong><br/>
+              Service-Neustart erforderlich um Änderungen zu aktivieren.
+            </Alert>
+          )}
+
+          {saveConfigMutation.isError && (
+            <Alert severity="error" sx={{ ml: 2 }}>
+              Fehler beim Speichern der Konfiguration: {saveConfigMutation.error?.message}
             </Alert>
           )}
 

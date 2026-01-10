@@ -1,7 +1,28 @@
-# Docker Compose für React + FastAPI Setup (ohne lokale DB)
-# Backend und Frontend Services - Datenbank läuft extern
+# Docker Compose für React + FastAPI Setup
+# Backend, Frontend und PostgreSQL Datenbank
 
 services:
+  # PostgreSQL Datenbank
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=ml_predictions
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    networks:
+      - ml-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d ml_predictions"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # FastAPI Backend
   backend:
     build:
@@ -10,14 +31,17 @@ services:
     expose:
       - "8000"  # Nicht nach außen exponieren, nur intern
     environment:
-      # Externe Datenbank - bitte in .env oder Environment setzen
-      - DATABASE_URL=${DATABASE_URL:-postgresql://user:pass@localhost:5432/crypto}
+      - DATABASE_URL=postgresql://user:password@db:5432/ml_predictions
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-}
       # Training Service für Modell-Import
       - TRAINING_SERVICE_API_URL=${TRAINING_SERVICE_API_URL:-http://localhost:8001/api}
     volumes:
       - ./models:/app/models
       - ./logs:/app/logs
+      - config_data:/app/config  # Shared config volume
+    depends_on:
+      db:
+        condition: service_healthy
     networks:
       - ml-network
     restart: unless-stopped
@@ -41,8 +65,13 @@ services:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
       - /app/node_modules
+      - config_data:/app/config  # Shared config volume
 
 networks:
   ml-network:
     driver: bridge
+
+volumes:
+  postgres_data:
+  config_data:
 

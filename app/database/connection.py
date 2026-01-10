@@ -6,7 +6,7 @@ Die Datenbank ist EXTERN und wird über DB_DSN konfiguriert.
 """
 import asyncpg
 from typing import Optional
-from app.utils.config import DB_DSN
+from app.utils.config import DB_DSN, load_config
 
 # Globaler Connection Pool (wird beim ersten Aufruf erstellt)
 pool: Optional[asyncpg.Pool] = None
@@ -35,11 +35,15 @@ async def get_pool() -> asyncpg.Pool:
         try:
             # DB_DSN enthält externe DB-Adresse, z.B.:
             # postgresql://user:pass@100.76.209.59:5432/crypto
+            # SSL basierend auf der URL entscheiden
+            ssl_mode = False if 'localhost' in DB_DSN or 'db:' in DB_DSN else True
+
             pool = await asyncpg.create_pool(
                 DB_DSN,
                 min_size=1,
                 max_size=10,
-                command_timeout=60
+                command_timeout=60,
+                ssl=ssl_mode
             )
             # Logging wird später hinzugefügt (nach Schritt 7)
             print(f"✅ Datenbank-Pool erstellt: {DB_DSN.split('@')[1] if '@' in DB_DSN else 'localhost'}")

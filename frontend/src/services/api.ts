@@ -74,6 +74,17 @@ export const modelsApi = {
     return response.data;
   },
 
+  // Konfiguration
+  getConfig: async (): Promise<any> => {
+    const response = await apiClient.get('/config');
+    return response.data;
+  },
+
+  updateConfig: async (config: any): Promise<any> => {
+    const response = await apiClient.post('/config', config);
+    return response.data;
+  },
+
   // Einzelnes Modell abrufen
   getById: async (id: number): Promise<Model> => {
     const response: AxiosResponse<ModelResponse> = await apiClient.get(`/models/${id}`);
