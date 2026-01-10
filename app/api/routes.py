@@ -1219,16 +1219,23 @@ async def restart_service():
     """
     Service-Neustart initiieren.
 
-    Diese Route zeigt nur eine Anleitung für den manuellen Neustart.
-    Ein automatischer Neustart ist aus technischen Gründen nicht möglich.
+    Sendet ein SIGTERM Signal an den aktuellen Prozess, wodurch Supervisor
+    den Service automatisch neu startet (--reload Flag erforderlich).
     """
     try:
-        logger.info("🔄 Service-Neustart angefordert")
+        import signal
+        import os
+
+        logger.warning("🔄 Service-Neustart angefordert über API")
+
+        # Sende SIGTERM an den aktuellen Prozess, um einen Graceful Shutdown zu initiieren
+        # Wenn der Service mit --reload gestartet wurde, wird er automatisch neu gestartet
+        os.kill(os.getpid(), signal.SIGTERM)
 
         return {
-            "message": "Führen Sie './restart_service.sh' aus oder starten Sie den Service manuell neu.",
-            "script_available": True,
-            "manual_command": "pkill -f uvicorn && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
+            "message": "Service wird neu gestartet... Bitte warten Sie einen Moment.",
+            "requires_manual_restart": False,
+            "auto_restart_enabled": True,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:

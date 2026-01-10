@@ -24,7 +24,11 @@ const Settings: React.FC = () => {
   const restartMutation = useMutation({
     mutationFn: modelsApi.restartService,
     onSuccess: (data) => {
-      console.log('Service restart requested:', data);
+      console.log('Service restart initiated:', data);
+      // Zeige Bestätigung und lade Seite nach 3 Sekunden neu
+      setTimeout(() => {
+        window.location.reload();
+      }, 3000);
     },
     onError: (error) => {
       console.error('Fehler beim Service-Neustart:', error);
@@ -163,10 +167,9 @@ const Settings: React.FC = () => {
           )}
 
           {restartMutation.isSuccess && (
-            <Alert severity="info" sx={{ ml: 2 }}>
-              <strong>Service-Neustart erforderlich!</strong><br/>
-              Führen Sie aus: <code>./restart_service.sh</code><br/>
-              Oder: <code>pkill -f uvicorn && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload</code>
+            <Alert severity="success" sx={{ ml: 2 }}>
+              <strong>✅ Service wird neu gestartet!</strong><br/>
+              Die Seite wird in wenigen Sekunden automatisch neu geladen...
             </Alert>
           )}
 
