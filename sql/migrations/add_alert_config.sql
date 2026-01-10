@@ -19,3 +19,4 @@ COMMENT ON COLUMN prediction_active_models.coin_whitelist IS 'Liste der erlaubte
 
 -- Indizes für Performance
 CREATE INDEX IF NOT EXISTS idx_active_models_coin_filter ON prediction_active_models(coin_filter_mode);
+

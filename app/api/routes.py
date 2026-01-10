@@ -1234,5 +1234,3 @@ async def restart_service():
     except Exception as e:
         logger.error(f"❌ Fehler beim Service-Neustart: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-

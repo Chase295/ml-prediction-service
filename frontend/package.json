@@ -15,15 +15,18 @@
     "@hookform/resolvers": "^5.2.2",
     "@mui/icons-material": "^7.3.6",
     "@mui/material": "^7.3.6",
+    "@mui/x-date-pickers": "^8.23.0",
     "@tanstack/react-query": "^5.90.15",
+    "@types/node": "^25.0.3",
     "axios": "^1.13.2",
-    "lucide-react": "^0.562.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "react-hook-form": "^7.69.0",
+    "date-fns": "^4.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-hook-form": "^7.70.0",
     "react-router-dom": "^7.11.0",
     "recharts": "^3.6.0",
-    "zod": "^4.2.1"
+    "zod": "^4.3.5",
+    "zustand": "^5.0.9"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

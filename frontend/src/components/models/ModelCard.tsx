@@ -119,8 +119,8 @@ const ModelCard: React.FC<ModelCardProps> = React.memo(({
         cursor: 'pointer',
         '&:hover': {
           transform: 'translateY(-2px)',
-          boxShadow: (theme) => theme.shadows[4],
-          borderColor: (theme) => theme.palette.primary.main
+          boxShadow: 4,
+          borderColor: 'primary.main'
         }
       }}
     >

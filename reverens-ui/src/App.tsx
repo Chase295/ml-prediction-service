@@ -1,10 +1,5 @@
-/**
- * Haupt-Applikation - ML Prediction Service
- * Moderne UI mit Gradient-Design und Drawer-Navigation
- */
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { QueryClientProvider } from '@tanstack/react-query';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import {
   AppBar,
@@ -20,31 +15,41 @@ import {
   ListItemText,
   useMediaQuery,
   IconButton,
+  Container,
 } from '@mui/material';
 import {
   Dashboard as DashboardIcon,
   Settings as SettingsIcon,
+  Analytics as MetricsIcon,
+  Info as InfoIcon,
+  ViewList as ModelsIcon,
   Add as TrainingIcon,
-  Notifications as AlertsIcon,
+  Science as TestingIcon,
+  Assessment as TestResultsIcon,
+  Compare as CompareIcon,
+  TableChart as ComparisonsIcon,
+  Work as JobsIcon,
   Menu as MenuIcon,
 } from '@mui/icons-material';
 
-// Provider
-import { queryClient } from './services/queryClient';
+// Pages
+import Dashboard from './pages/Dashboard';
+import Jobs from './pages/Jobs';
+import Training from './pages/Training';
+import Testing from './pages/Testing';
+import Compare from './pages/Compare';
+import CompareDetails from './pages/CompareDetails';
+import Comparisons from './pages/Comparisons';
+import Details from './pages/Details';
+import ModelDetails from './pages/ModelDetails';
+import Config from './pages/Config';
+import Metrics from './pages/Metrics';
+import Info from './pages/Info';
+import Models from './pages/Models';
+import TestResults from './pages/TestResults';
+import TestResultDetails from './pages/TestResultDetails';
 
-// Components
-import ErrorBoundary from './components/common/ErrorBoundary';
-import LoadingSpinner from './components/common/LoadingSpinner';
-
-// Pages (werden später implementiert)
-const Overview = React.lazy(() => import('./pages/Overview'));
-const ModelDetails = React.lazy(() => import('./pages/ModelDetails'));
-const AlertConfig = React.lazy(() => import('./pages/AlertConfig'));
-const AlertSystem = React.lazy(() => import('./pages/AlertSystem'));
-const ModelImport = React.lazy(() => import('./pages/ModelImport'));
-const Settings = React.lazy(() => import('./pages/Settings'));
-
-// Theme - Modernes Dark Design mit Gradient
+// Theme
 const theme = createTheme({
   palette: {
     mode: 'dark',
@@ -76,25 +81,31 @@ const theme = createTheme({
   },
 });
 
-// Navigation Items für ML Prediction Service
+// Navigation Items - Alle 12 Tabs für ML Training
 const navItems = [
-  { path: '/overview', label: 'Übersicht', icon: <DashboardIcon /> },
-  { path: '/model-import', label: 'Modell Import', icon: <TrainingIcon /> },
-  { path: '/alert-system', label: 'Alert System', icon: <AlertsIcon /> },
-  { path: '/settings', label: 'Einstellungen', icon: <SettingsIcon /> },
+  { path: '/', label: 'Dashboard', icon: <DashboardIcon /> },
+  { path: '/config', label: 'Konfiguration', icon: <SettingsIcon /> },
+  { path: '/metrics', label: 'Metriken', icon: <MetricsIcon /> },
+  { path: '/info', label: 'Info', icon: <InfoIcon /> },
+  { path: '/models', label: 'Modelle', icon: <ModelsIcon /> },
+  { path: '/training', label: 'Training', icon: <TrainingIcon /> },
+  { path: '/test', label: 'Testen', icon: <TestingIcon /> },
+  { path: '/test-results', label: 'Test-Ergebnisse', icon: <TestResultsIcon /> },
+  { path: '/compare', label: 'Vergleichen', icon: <CompareIcon /> },
+  { path: '/comparisons', label: 'Vergleichs-Übersicht', icon: <ComparisonsIcon /> },
+  { path: '/jobs', label: 'Jobs', icon: <JobsIcon /> },
 ];
-
 
 // Layout Component
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const location = useLocation();
-  const isMobile = useMediaQuery('(max-width:960px)');
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
   const [drawerOpen, setDrawerOpen] = React.useState(false);
 
   const drawerContent = (
     <Box sx={{ width: 250, pt: 2 }}>
       <Typography variant="h6" sx={{ px: 2, pb: 1, fontWeight: 'bold', color: '#00d4ff' }}>
-        🤖 ML Prediction Service
+        🤖 ML Training Service
       </Typography>
       <List>
         {navItems.map((item) => (
@@ -215,7 +226,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
               </IconButton>
             )}
             <Typography variant="h6" component="div" sx={{ flexGrow: 1, color: '#00d4ff' }}>
-              🤖 ML Prediction Service Management
+              🤖 ML Training Service Management
             </Typography>
             <Typography variant="body2" sx={{ opacity: 0.7 }}>
               v1.0.0
@@ -232,36 +243,44 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   );
 };
 
+// Coming Soon Component
+const ComingSoon: React.FC<{ title: string }> = ({ title }) => (
+  <Container maxWidth="md" sx={{ py: 8, textAlign: 'center' }}>
+    <Typography variant="h4" sx={{ color: '#00d4ff', mb: 2 }}>
+      🚧 {title}
+    </Typography>
+    <Typography variant="body1" color="textSecondary">
+      Diese Funktion wird in Kürze implementiert.
+    </Typography>
+  </Container>
+);
+
 // Main App Component
 function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <ErrorBoundary>
-        <QueryClientProvider client={queryClient}>
-          <Router>
-            <Layout>
-              <React.Suspense fallback={<LoadingSpinner message="Seite wird geladen..." />}>
-                <Routes>
-                  {/* Redirect root to overview */}
-                  <Route path="/" element={<Overview />} />
-
-                  {/* Main routes */}
-                  <Route path="/overview" element={<Overview />} />
-                  <Route path="/model/:id" element={<ModelDetails />} />
-                  <Route path="/model/:id/alert-config" element={<AlertConfig />} />
-                  <Route path="/alert-system" element={<AlertSystem />} />
-                  <Route path="/model-import" element={<ModelImport />} />
-                  <Route path="/settings" element={<Settings />} />
-
-                  {/* Fallback für ungültige Routen */}
-                  <Route path="*" element={<Overview />} />
-                </Routes>
-              </React.Suspense>
-            </Layout>
-          </Router>
-        </QueryClientProvider>
-      </ErrorBoundary>
+      <Router>
+        <Layout>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/config" element={<Config />} />
+            <Route path="/metrics" element={<Metrics />} />
+            <Route path="/info" element={<Info />} />
+            <Route path="/models" element={<Models />} />
+            <Route path="/training" element={<Training />} />
+            <Route path="/test" element={<Testing />} />
+            <Route path="/test-results" element={<TestResults />} />
+            <Route path="/test-result-details/:id" element={<TestResultDetails />} />
+            <Route path="/compare" element={<Compare />} />
+            <Route path="/comparisons" element={<Comparisons />} />
+            <Route path="/comparisons/:id" element={<CompareDetails />} />
+            <Route path="/jobs" element={<Jobs />} />
+            <Route path="/details/:id" element={<Details />} />
+            <Route path="/model-details/:id" element={<ModelDetails />} />
+          </Routes>
+        </Layout>
+      </Router>
     </ThemeProvider>
   );
 }

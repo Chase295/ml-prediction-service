@@ -241,5 +241,3 @@ class IgnoreSettingsResponse(BaseModel):
     ignore_bad_seconds: int
     ignore_positive_seconds: int
     ignore_alert_seconds: int
-
-

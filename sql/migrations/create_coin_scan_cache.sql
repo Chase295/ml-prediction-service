@@ -47,3 +47,4 @@ CREATE INDEX IF NOT EXISTS idx_coin_scan_cache_alerts ON coin_scan_cache(was_ale
 
 -- Partitionsstrategie für große Datenmengen (optional, für später)
 -- Die Tabelle könnte partitioniert werden nach active_model_id für bessere Performance
+

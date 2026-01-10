@@ -23,3 +23,4 @@ python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
 echo "✅ Service restarted!"
 echo "🌐 Available at: http://localhost:8000"
 echo "📱 Frontend at: http://localhost:5173"
+

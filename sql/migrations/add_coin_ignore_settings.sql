@@ -15,3 +15,4 @@ COMMENT ON COLUMN prediction_active_models.ignore_alert_seconds IS 'Sekunden, di
 
 -- Indizes für Performance (falls viele Modelle)
 CREATE INDEX IF NOT EXISTS idx_active_models_ignore_timings ON prediction_active_models(ignore_bad_seconds, ignore_positive_seconds, ignore_alert_seconds);
+

@@ -26,3 +26,4 @@ COMMENT ON COLUMN prediction_active_models.simulated_profit_pct IS 'Simulierte P
 CREATE INDEX IF NOT EXISTS idx_active_models_accuracy ON prediction_active_models(training_accuracy);
 CREATE INDEX IF NOT EXISTS idx_active_models_f1 ON prediction_active_models(training_f1);
 CREATE INDEX IF NOT EXISTS idx_active_models_profit ON prediction_active_models(simulated_profit_pct);
+

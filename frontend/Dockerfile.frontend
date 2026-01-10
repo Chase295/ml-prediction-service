@@ -6,9 +6,9 @@ FROM node:18-alpine AS builder
 
 WORKDIR /app
 
-# Dependencies installieren
+# Dependencies installieren (inkl. devDependencies für Build)
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci
 
 # Source-Code kopieren
 COPY . .
@@ -20,7 +20,7 @@ RUN npm run build
 FROM nginx:alpine
 
 # Nginx-Konfiguration für React Router
-COPY --from=builder /app/build /usr/share/nginx/html
+COPY --from=builder /app/dist /usr/share/nginx/html
 
 # Custom Nginx-Konfiguration für SPA
 RUN echo 'server {\
@@ -42,3 +42,4 @@ RUN echo 'server {\
 EXPOSE 3000
 
 CMD ["nginx", "-g", "daemon off;"]
+

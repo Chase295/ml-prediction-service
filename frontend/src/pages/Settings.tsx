@@ -4,21 +4,17 @@ import {
   Typography,
   Paper,
   Box,
-  Switch,
-  FormControlLabel,
   TextField,
   Button,
   Alert
 } from '@mui/material';
 import { RestartAlt as RestartIcon } from '@mui/icons-material';
-import { ThemeContext } from '../App';
 import PageContainer from '../components/layout/PageContainer';
 
 // Services
 import { modelsApi } from '../services/api';
 
 const Settings: React.FC = () => {
-  const { toggleTheme, isDarkMode } = React.useContext(ThemeContext);
   const [apiUrl, setApiUrl] = React.useState('http://localhost:8000/api');
   const [trainingServiceUrl, setTrainingServiceUrl] = React.useState('http://ml-training-service:8000/api');
   const [dbDsn, setDbDsn] = React.useState('postgresql://user:pass@localhost:5432/crypto');
@@ -80,25 +76,6 @@ const Settings: React.FC = () => {
       </Box>
 
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 3, mb: 3 }}>
-        {/* Theme Einstellungen */}
-        <Paper sx={{ p: 3 }}>
-          <Typography variant="h6" gutterBottom>
-            Darstellung
-          </Typography>
-          <Box sx={{ mt: 2 }}>
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={isDarkMode}
-                  onChange={toggleTheme}
-                  color="primary"
-                />
-              }
-              label="Dunkler Modus"
-            />
-          </Box>
-        </Paper>
-
         {/* API Einstellungen */}
         <Paper sx={{ p: 3 }}>
           <Typography variant="h6" gutterBottom>
