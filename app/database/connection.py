@@ -6,7 +6,7 @@ Die Datenbank ist EXTERN und wird über DB_DSN konfiguriert.
 """
 import asyncpg
 from typing import Optional
-from app.utils.config import DB_DSN, load_config
+from app.utils.config import DB_DSN
 
 # Globaler Connection Pool (wird beim ersten Aufruf erstellt)
 pool: Optional[asyncpg.Pool] = None

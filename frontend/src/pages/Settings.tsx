@@ -1,5 +1,5 @@
 import React from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   Typography,
   Paper,
@@ -13,6 +13,7 @@ import PageContainer from '../components/layout/PageContainer';
 
 // Services
 import { modelsApi } from '../services/api';
+import { queryClient } from '../services/queryClient';
 
 const Settings: React.FC = () => {
   // Persistente Konfiguration (wird im Backend gespeichert)
@@ -73,12 +74,12 @@ const Settings: React.FC = () => {
   };
 
   const handleReset = () => {
-    setApiUrl('http://localhost:8000/api');
-    setTrainingServiceUrl('http://ml-training-service:8000/api');
-    setDbDsn('postgresql://user:pass@localhost:5432/crypto');
-    localStorage.removeItem('apiUrl');
-    localStorage.removeItem('trainingServiceUrl');
-    localStorage.removeItem('dbDsn');
+    // Setze auf Standardwerte zurück
+    setDatabaseUrl('postgresql://user:password@db:5432/ml_predictions');
+    setTrainingServiceUrl('http://localhost:8001/api');
+    setN8nWebhookUrl('');
+    setApiPort(8000);
+    setStreamlitPort(8501);
   };
 
   const handleRestart = () => {
@@ -108,36 +109,6 @@ const Settings: React.FC = () => {
         </Typography>
       </Box>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 3, mb: 3 }}>
-        {/* API Einstellungen */}
-        <Paper sx={{ p: 3 }}>
-          <Typography variant="h6" gutterBottom>
-            API-Konfiguration
-          </Typography>
-          <Box sx={{ mt: 2 }}>
-            <TextField
-              fullWidth
-              label="API-Basis-URL"
-              value={apiUrl}
-              onChange={(e) => setApiUrl(e.target.value)}
-              variant="outlined"
-              sx={{ mb: 2 }}
-            />
-            <TextField
-              fullWidth
-              label="Training-Service-URL"
-              value={trainingServiceUrl}
-              onChange={(e) => setTrainingServiceUrl(e.target.value)}
-              variant="outlined"
-              sx={{ mb: 2 }}
-              helperText="URL zum Training-Service für Modell-Downloads"
-            />
-            <Alert severity="info" sx={{ mb: 2 }}>
-              Änderungen an den API-URLs erfordern einen Neustart der Anwendung.
-            </Alert>
-          </Box>
-        </Paper>
-      </Box>
 
       {/* Datenbank Einstellungen */}
       <Paper sx={{ p: 3, mb: 3 }}>

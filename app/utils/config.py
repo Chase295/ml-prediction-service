@@ -50,6 +50,9 @@ def save_persistent_config(config: Dict[str, Any]) -> bool:
 # Lade persistente Konfiguration
 _persistent_config = load_persistent_config()
 
+# Exportiere Funktionen für API-Zugriff
+__all__ = ['load_persistent_config', 'save_persistent_config']
+
 # ============================================================
 # Datenbank (EXTERNE DB!)
 # ============================================================

@@ -1,7 +1,7 @@
 """
 FastAPI Routes für ML Prediction Service
 """
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, Response, status
 from fastapi.responses import PlainTextResponse
